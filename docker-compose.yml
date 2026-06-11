@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg15-latest
+    container_name: trafico_db
+#    restart: always
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=dev_password_seguro
+      - POSTGRES_DB=vialidades_slp
+    ports:
+      - "5432:5432"
+    volumes:
+      - datos_postgres:/home/postgres/pgdata/data
+    networks:
+      - red_trafico
+
+  etl_worker:
+    build: .
+    container_name: etl_trafico
+    depends_on:
+      - timescaledb
+    environment:
+      - DB_USER=user
+      - DB_PASS=dev_password_seguro
+      - DB_HOST=timescaledb
+      - DB_NAME=vialidades_slp
+      - TOMTOM_API_KEY=${TOMTOM_API_KEY}
+    volumes:
+      - .:/app
+    networks:
+      - red_trafico
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana_bi
+    depends_on:
+      - timescaledb
+    dns:
+      - 8.8.8.8
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - red_trafico
+
+networks:
+  red_trafico:
+    driver: bridge
+
+volumes:
+  datos_postgres:
+    driver: local
+  grafana_data:
+    driver: local
