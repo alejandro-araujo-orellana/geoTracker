@@ -48,7 +48,8 @@ DB_URL = config.DB_URL
 # Bounding box de la zona metropolitana de SLP en WGS84 (lon_min, lat_min, lon_max, lat_max).
 # Estos valores cubren la mancha urbana principal. Amplíalos si tu red de avenidas
 # cubre zonas periféricas como Soledad de Graciano Sánchez.
-BBOX = (-101.05, 22.08, -100.89, 22.21)
+#BBOX = (-101.05, 22.08, -100.89, 22.21)
+BBOX = (-101.03, 22.11, -100.96, 22.19)
 
 # Resolución de la grilla: distancia entre puntos en METROS.
 # 200m → grilla densa (~2500 puntos sobre SLP), buena para heatmap detallado.
@@ -64,6 +65,14 @@ K_VECINOS = 5
 # p=2 es el estándar (peso ∝ 1/d²). Valores mayores concentran más la influencia
 # en el vecino más cercano; valores menores distribuyen más uniformemente.
 POTENCIA_IDW = 2
+
+# Radio máximo de influencia en metros.
+# Un punto de grilla cuyo vecino fuente más cercano esté más lejos que este valor
+# recibe congestion = 1.0 (flujo libre neutro) en lugar de un valor interpolado.
+# Esto evita que avenidas lejanas "tiñan" zonas de la ciudad donde no hay medición.
+# 600m cubre bien las manzanas entre avenidas principales sin generar manchas.
+# Ajusta hacia arriba si ves zonas oscuras donde SÍ hay avenidas cubiertas.
+DISTANCIA_MAX_M = 600
 
 # SRID métrico para SLP. UTM Zona 14N cubre toda la región y mide en metros,
 # lo que permite calcular distancias reales sin convertir grados a metros a mano.
@@ -122,31 +131,77 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 2 — Construir centroides en proyección métrica
+# Etapa 2 — Muestrear puntos equidistantes sobre cada segmento
 # ---------------------------------------------------------------------------
 
-def calcular_centroides_metricos(gdf_fuentes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+# Distancia en metros entre puntos de muestreo sobre cada LineString.
+# 150m significa que un segmento de 600m genera 4 puntos fuente en lugar de 1.
+# Valores menores = cobertura más densa = heatmap más continuo.
+MUESTREO_LINEA_M = 75
+
+def muestrear_puntos_linea(gdf_fuentes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Transforma cada segmento (LineString) a su punto central y proyecta a metros.
+    Convierte cada LineString en N puntos equidistantes, todos con el mismo
+    nivel_congestion del segmento padre.
 
-    Por qué el centroide: el IDW necesita un punto representativo de cada fuente.
-    El centroide de la línea es el punto que minimiza la distancia media a todos
-    los vértices del segmento — una buena aproximación del "centro de influencia"
-    de la avenida.
+    Por qué esto resuelve los vacíos del heatmap:
+    Con un solo centroide por segmento, la influencia IDW decae rápidamente
+    hacia los extremos de la avenida. Una calle de 1.5km representada como
+    un punto en su km 0.75 aporta muy poco calor a los puntos de grilla
+    cerca de su inicio o su final.
 
-    Por qué EPSG:32614: geopandas calcula distancias en las unidades del CRS.
-    Con WGS84 (grados) obtendríamos "0.0045 unidades", que no tiene semántica.
-    Con UTM 14N obtenemos metros reales, lo que hace que GRID_RESOLUTION_M y
-    el denominador del IDW tengan significado físico concreto.
+    Al muestrear puntos cada MUESTREO_LINEA_M metros, la influencia se
+    distribuye uniformemente a lo largo de toda la longitud de la vía,
+    produciendo un heatmap continuo sin vacíos entre avenidas.
+
+    shapely.interpolate(distancia) genera un Point en la posición exacta
+    a `distancia` metros siguiendo los vértices reales de la línea.
+
+    Retorna un GeoDataFrame de Points en EPSG:32614 (metros UTM 14N),
+    con más filas que el input (una por cada punto de muestreo).
     """
-    log.info("Etapa 2: calculando centroides y proyectando a UTM 14N...")
+    log.info(
+        f"Etapa 2: muestreando puntos cada {MUESTREO_LINEA_M}m sobre cada segmento..."
+    )
 
-    gdf_m = gdf_fuentes.copy()
-    gdf_m = gdf_m.to_crs(epsg=SRID_METRICO)             # Grados -> Metros
-    gdf_m["geometry"] = gdf_m.geometry.centroid   # LineString -> Point
+    # Proyectar a metros primero — interpolate() usa las unidades del CRS.
+    # En WGS84 (grados) interpolate(150) generaría un punto a 150 GRADOS,
+    # que está fuera del planeta. En UTM 14N genera un punto a 150 metros.
+    gdf_m = gdf_fuentes.to_crs(epsg=SRID_METRICO)
 
-    log.info(f"  → CRS activo: {gdf_m.crs.name}")
-    return gdf_m
+    registros = []
+    for _, fila in gdf_m.iterrows():
+        linea    = fila["geom"]
+        longitud = linea.length  # metros (CRS métrico)
+
+        if longitud == 0:
+            # Segmento degenerado (punto único), usar su coordenada directamente
+            registros.append({
+                "id_segmento":      fila.id_segmento,
+                "nombre_via":       fila.nombre_via,
+                "nivel_congestion": fila.nivel_congestion,
+                "geom":         fila["geom"].centroid,
+            })
+            continue
+
+        # Posiciones de muestreo: 0m, 150m, 300m, ... + el punto final exacto.
+        distancias = list(np.arange(0, longitud, MUESTREO_LINEA_M)) + [longitud]
+
+        for d in distancias:
+            registros.append({
+                "id_segmento":      fila.id_segmento,
+                "nombre_via":       fila.nombre_via,
+                "nivel_congestion": fila.nivel_congestion,
+                "geom":         linea.interpolate(d),
+            })
+
+    gdf_puntos = gpd.GeoDataFrame(registros, geometry="geom", crs=f"EPSG:{SRID_METRICO}")
+
+    log.info(
+        f"  → {len(gdf_fuentes)} segmentos → {len(gdf_puntos)} puntos fuente "
+        f"(~{len(gdf_puntos)/len(gdf_fuentes):.1f} puntos/segmento)"
+    )
+    return gdf_puntos
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +264,7 @@ def aplicar_idw(
     gdf_fuentes: gpd.GeoDataFrame,
     k: int,
     potencia: float,
+    distancia_max: float,
 ) -> np.ndarray:
     """
     Calcula el nivel de congestión inferido en cada punto de la grilla
@@ -239,7 +295,7 @@ def aplicar_idw(
         [geom.coords[0] for geom in gdf_fuentes.geometry]
     )
     coords_objetivo = np.array(
-        [(geom.x, geom.y) for geom in gdf_grilla.geometry]
+        [geom.coords[0] for geom in gdf_grilla.geometry]
     )
     valores_fuentes = gdf_fuentes["nivel_congestion"].values.astype(float)
 
@@ -265,6 +321,18 @@ def aplicar_idw(
 
     # Suma ponderada final
     congestion_inferida = np.sum(pesos_norm * congestion_vecinos, axis=1)
+
+    # mascara de distancia maxima
+    # distancias [:,0] es la distancia al vecino mas cercano de cada punto
+    # si ese vecino ya esta mas lejos de lo permitido por DISTANCIA_MAX_M, el punto esta fuera
+    # de cobertura y asignamos 1.0 (un flujo libre) en lugar de propagar 
+    # influencias de avenidas lejanas, causando quitar las manchas difusas
+    fuera_de_rango = distancias[:, 0] > distancia_max
+    congestion_inferida[fuera_de_rango] = 1.0
+    log.info(
+        f"  → {fuera_de_rango.sum()} puntos fuera de rango ({distancia_max}m) "
+        f"asignados a 1.0 ({fuera_de_rango.mean()*100:.1f}% de la grilla)"
+    )
 
     # Asegurar que el resultado esté en [0, 1] (puede salirse por error numérico)
     congestion_inferida = np.clip(congestion_inferida, 1.0, 3.0)
@@ -349,13 +417,13 @@ def ejecutar(engine):
     gdf_fuentes_geo = leer_lecturas_recientes(engine)
 
     # Etapa 2
-    gdf_fuentes_m = calcular_centroides_metricos(gdf_fuentes_geo)
+    gdf_fuentes_m = muestrear_puntos_linea(gdf_fuentes_geo)
 
     # Etapa 3
     gdf_grilla = generar_grilla(BBOX, GRID_RESOLUTION_M)
 
     # Etapa 4
-    congestion = aplicar_idw(gdf_grilla, gdf_fuentes_m, K_VECINOS, POTENCIA_IDW)
+    congestion = aplicar_idw(gdf_grilla, gdf_fuentes_m, K_VECINOS, POTENCIA_IDW, DISTANCIA_MAX_M)
 
     # Etapa 5
     guardar_resultados(engine, gdf_grilla, congestion, timestamp)
