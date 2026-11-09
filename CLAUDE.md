@@ -115,6 +115,6 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 ## Estado actual y prioridades
 
 1. ETL detenido: TomTom devolvía HTTP 403 (cuota agotada: ~45 600 req/día). Aplicar `HORAS_PICO` o reducir puntos.
-2. Saneamiento de esquema: P1–P6 resueltos (2026-11-09). Pendientes: P7–P11 (ver `docs/DATABASE.md`).
+2. Saneamiento de esquema: P1–P7 resueltos (2026-11-09). Pendientes: P8–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

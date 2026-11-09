@@ -1,7 +1,7 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–006 el mismo día.
+> y actualizado tras aplicar las migraciones 001–007 el mismo día.
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
@@ -129,8 +129,10 @@ Restricción `uq_trafico_calles_ciclo UNIQUE (timestamp_calculo, osm_id)` (migra
 no recalcula si ese estado del tráfico ya existe, e inserta con `ON CONFLICT ... DO NOTHING`. Re-ejecutarlo
 sobre los mismos datos no duplica filas (verificado en una copia de la BD).
 
-Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01). Tiene dos índices idénticos sobre
-`timestamp_calculo DESC` (P7).
+Índices: `trafico_calles_timestamp_calculo_idx` (btree `timestamp_calculo DESC`, el que crea TimescaleDB
+por defecto) y el único `uq_trafico_calles_ciclo`.
+
+Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 
 ### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
@@ -152,6 +154,7 @@ BD existente y sobre una BD vacía.
 | 004 | (P3/P4) `u, v, k, maxspeed_kmh, oneway, activo` + único `(u, v, k)`; limpia `nombre = 'NaN'` |
 | 005 | (P5) PK e índice GiST en vértices; tipa `geom` como `Point,4326`; quita `in_edges/out_edges` |
 | 006 | (P6) `UNIQUE (timestamp_calculo, osm_id)` en `trafico_calles` |
+| 007 | (P7) Elimina el índice duplicado `idx_trafico_calles_tiempo` |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 
@@ -165,7 +168,7 @@ BD existente y sobre una BD vacía.
 | P4 | ✅ **Resuelto** — topología reconstruida a mano, sin `maxspeed` | — | `source/target = u/v`; vértices desde los nodos OSM; `maxspeed_kmh`, `oneway` |
 | P5 | ✅ **Resuelto** — vértices sin PK ni GiST | — | Migración 005; el nodo más cercano usa `Index Scan using idx_vertices_geom` |
 | P6 | ✅ **Resuelto** — `trafico_calles` sin unicidad | — | Migración 006; `timestamp_calculo` = referencia del ciclo; `ON CONFLICT DO NOTHING` + omisión de ciclos ya inferidos |
-| P7 | Índice duplicado en `trafico_calles` | Espacio y escritura extra | `DROP INDEX idx_trafico_calles_tiempo` |
+| P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
 | P8 | Sin políticas de compresión/retención | `trafico_calles` crece ~24 k filas por ciclo (~2.3 M/día) | `add_compression_policy` y `add_retention_policy` |
 | P9 | BBOX distintos: topología TomTom `(22.101,-101.045)–(22.219,-100.906)`, OSM `(22.11,-101.03)–(22.19,-100.96)` | Puntos medidos fuera de la red OSM | Unificar en `config.py` |
 | P10 | `trafico_inferido` obsoleta | Ruido en el esquema | Eliminar tras migrar paneles de Grafana |
