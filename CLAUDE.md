@@ -13,6 +13,8 @@ Documentación:
 - `docs/ARCHITECTURE.md` — reglas obligatorias (léelas antes de cambiar código).
 - `docs/DATABASE.md` — esquema real de la BD y deuda técnica numerada (P1–P11).
 - `docs/ROUTING.md` — diseño del ruteo con tráfico.
+- `docs/DECISIONES.md` — registro de decisiones (qué y por qué). **Agrega una entrada por cada decisión
+  de diseño** y cítala en el commit.
 
 ## Comandos
 

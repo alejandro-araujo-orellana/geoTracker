@@ -5,6 +5,7 @@ vial de San Luis Potosí. Documentos relacionados:
 
 - [`DATABASE.md`](DATABASE.md) — esquema real de la BD y deuda técnica (P1–P11).
 - [`ROUTING.md`](ROUTING.md) — diseño del ruteo con Dijkstra + tráfico.
+- [`DECISIONES.md`](DECISIONES.md) — registro de decisiones: qué se cambió y por qué.
 - [`CLAUDE.md`](../CLAUDE.md) — guía operativa (comandos, módulos).
 
 Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento conocido (con referencia).
@@ -35,13 +36,13 @@ Graciano Sánchez.
 * **Esquema versionado:** todo DDL (tablas, columnas, índices, hypertables, vistas) vive en `db/migrations/NNN_nombre.sql`, es idempotente y se aplica con `src/migrate.py` (automático al arrancar `main.py`). Una migración aplicada nunca se edita: se agrega otra. Nunca se modifica el esquema solo a mano. ✅
 * **Hypertables:** toda tabla de histórico (`fact_lecturas_trafico`, `trafico_calles`) se convierte en hypertable antes de recibir datos y debe tener política de compresión/retención. Los datos crudos (`fact_lecturas_trafico`) nunca expiran; los derivados sí. Ningún proceso escribe en chunks de más de 7 días (pueden estar comprimidos). ✅
 * **Variables de entorno:** ninguna credencial (BD, Grafana, TomTom) en código ni en `docker-compose.yml`; todo viene de `.env` (en `.gitignore`) vía `${VAR}`. Nombres canónicos: `TOMTOM_API_KEY`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GF_ADMIN_USER`, `GF_ADMIN_PASSWORD`. ⚠️ el compose tiene contraseñas literales y usa `DB_PASS`.
-* **Dockerfile del ETL:** una sola etapa basada en `python:3.11-slim` + dependencias de GDAL/libpq. ⚠️ hoy tiene un segundo `FROM timescaledb-ha` copiado de `db/Dockerfile`.
+* **Dockerfile del ETL:** una sola etapa basada en `python:3.11.15-slim-trixie` + dependencias de GDAL/libpq; debe construirse sin errores (`docker build .`). ✅ (D10)
 
 ## 2. Estándares de código (Python)
 
 * **Arquitectura modular:** responsabilidad única por módulo: `config`, `extractor`, `transformer`, `loader`, `predictor` y (próximo) `router`. Los scripts de preparación viven en `scripts/`. ✅
 * **E/S de red asíncrona en el ETL:** `aiohttp` + `asyncio`. `requests` solo se permite en scripts de preparación one-shot (`scripts/`). ✅
-* **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ⚠️ geopandas, shapely, pyproj, scipy, numpy, pandas, osmnx, requests sin fijar; la API usa `>=`.
+* **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ✅ en el ETL (D10). ⚠️ `services/api/requirements.txt` aún usa `>=`.
 * **Logging:** prohibido `print()` fuera de bloques `if __name__ == "__main__"` de prueba. Usar `logging` con nivel y timestamp; configurar `basicConfig` **solo** en los puntos de entrada (`main.py`, scripts), no en módulos. ⚠️ `config.py:38`; `basicConfig` repetido en loader/transformer/predictor.
 * **Configuración centralizada:** constantes compartidas se definen una sola vez: la zona de estudio en `src/zona.py` (un test impide definir otro `BBOX`), el resto (SRID, intervalos, horas pico) en `src/config.py`. ✅
 
