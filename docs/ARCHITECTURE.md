@@ -11,7 +11,7 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 ## 0. Visión del sistema
 
-1. **Medir** el tráfico en 440 puntos de avenidas principales (TomTom Flow API).
+1. **Medir** el tráfico en 207 puntos de avenidas principales (TomTom Flow Segment Data), dentro de un pool mensual de peticiones.
 2. **Inferir** la congestión en toda la red vial OSM (~67.5 k aristas) por IDW → mapa de calor en Grafana.
 
 Ambos cubren la misma zona de estudio (`src/zona.py`): zona metropolitana de SLP incluida Soledad de
@@ -50,7 +50,7 @@ Graciano Sánchez.
 * **Reintentos:** ante `429` o `5XX`, backoff exponencial con jitter (`TOMTOM_TIEMPO_BASE · 2^n + U(0,1)` s, máximo `TOMTOM_MAX_REINTENTOS` = 4). Errores `4XX` restantes son fatales para ese punto. ✅
 * **Timeouts:** 10 s por petición. ✅
 * **Concurrencia:** semáforo de `TOMTOM_LIMITE_CONCURRENCIA` = 20. ✅
-* **Economía de peticiones:** el consumo diario debe caber en la cuota de TomTom. Con N puntos y ciclos cada M minutos: `N × ciclos/día ≤ cuota`. El orquestador debe respetar `HORAS_PICO` y/o reducir N. Ningún punto de monitoreo puede quedar fuera de la zona de estudio (`generador_topologia.filtrar_en_zona`). ⚠️ `HORAS_PICO` no se usa; 440 puntos × 96 ciclos ≈ 42 000 req/día. Último estado del ETL: todas las peticiones con HTTP 403.
+* **Economía de peticiones:** el consumo diario debe caber en la cuota de TomTom. Con N puntos y ciclos cada M minutos: `N × ciclos/día ≤ cuota`. El orquestador debe respetar `HORAS_PICO` y/o reducir N. Ningún punto de monitoreo puede quedar fuera de la zona de estudio (`generador_topologia.filtrar_en_zona`) ni repetir el segmento de otro (`deduplicar_puntos.py`). Toda llamada a una API con cuota pasa por `src/presupuesto.py`: cupo por ciclo derivado de la cuota **mensual**, ponderado por `HORAS_PICO`, contando cada intento HTTP en `consumo_api` y deteniéndose ante un 403. ✅
 
 ## 4. Tratamiento de datos
 
@@ -71,4 +71,4 @@ Graciano Sánchez.
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (69 tests en verde al 2026-11-09)
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (99 tests en verde al 2026-11-09)

@@ -61,6 +61,13 @@ DB_URL = config.DB_URL
 # actual" de hace más de una semana no sirve para el mapa de calor ni el ruteo.
 ANTIGUEDAD_MAXIMA = timedelta(days=7)
 
+# Solo se usan como fuentes del IDW las lecturas de las últimas N horas. Con el
+# pool de peticiones (presupuesto.py) cada ciclo mide pocos puntos y el resto
+# conserva lecturas viejas: mezclarlas pintaría tráfico de otro día como actual.
+# 6 h ≈ el tiempo en que la rotación renueva todos los puntos en horas pico con
+# ~800 peticiones/día; en horas valle habrá menos fuentes (más calles en 1.0).
+VENTANA_LECTURAS = timedelta(hours=6)
+
 # Número de vecinos medidos que participan en cada cálculo IDW.
 # Con K=5 el resultado es robusto sin ser dominado por un solo segmento atípico.
 # Aumentar K suaviza el mapa; reducirlo lo hace más "pico".
@@ -90,7 +97,8 @@ SRID_METRICO = 32614
 
 def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
     """
-    Trae la lectura más reciente de cada segmento vial medido.
+    Trae la lectura más reciente de cada segmento vial medido dentro de
+    VENTANA_LECTURAS (los segmentos sin lectura reciente no participan).
 
     Usamos un subquery con ROW_NUMBER() para quedarnos con una sola fila
     por segmento (la más reciente), evitando duplicados que distorsionarían
@@ -112,6 +120,7 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
                     ORDER BY timestamp_lectura DESC
                 ) AS rn
             FROM fact_lecturas_trafico
+            WHERE timestamp_lectura >= %(desde)s
         )
         SELECT
             d.id_segmento,
@@ -129,8 +138,11 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
     try:
         with engine.connect() as conn:
             conexion_nativa = conn.connection
-            gdf = gpd.read_postgis(sql, con=conexion_nativa, geom_col='geom')
-        log.info(f" -> {len(gdf)} segmentos medidos cargados.")
+            gdf = gpd.read_postgis(
+                sql, con=conexion_nativa, geom_col='geom',
+                params={"desde": _ahora() - VENTANA_LECTURAS},
+            )
+        log.info(f" -> {len(gdf)} segmentos con lectura en las últimas {VENTANA_LECTURAS} cargados.")
         return gdf
     except Exception as e:
         log.error(f"Error fatal extrayendo geometrias de PostGIS: {e}")

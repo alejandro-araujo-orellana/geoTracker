@@ -48,6 +48,21 @@ class TestReferenciaCiclo:
         assert ref.tzinfo is not None
 
 
+class TestLeerLecturasRecientes:
+    def test_solo_usa_lecturas_dentro_de_la_ventana(self):
+        # Con el pool (B.2) cada ciclo mide pocos puntos: el resto conserva lecturas
+        # viejas que no deben mezclarse con el tráfico actual.
+        engine = MagicMock()
+        ahora = datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc)
+        with patch.object(predictor, "_ahora", return_value=ahora), \
+             patch.object(predictor.gpd, "read_postgis", return_value=_lecturas([T1])) as leer:
+            predictor.leer_lecturas_recientes(engine)
+
+        sql = leer.call_args.args[0]
+        assert "timestamp_lectura >= %(desde)s" in sql
+        assert leer.call_args.kwargs["params"] == {"desde": ahora - predictor.VENTANA_LECTURAS}
+
+
 class TestGuardarResultados:
     def test_insert_es_idempotente(self):
         engine = MagicMock()

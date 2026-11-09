@@ -15,6 +15,15 @@ TOMTOM_BASE_URL: str = (
 TOMTOM_LIMITE_CONCURRENCIA: int = 20
 TOMTOM_TIEMPO_BASE: float = 1.0
 TOMTOM_MAX_REINTENTOS: int = 4
+
+# Pool de peticiones (src/presupuesto.py). Flow Segment Data: 20 000 gratis al MES.
+# Ajustable por entorno si cambia el plan de TomTom.
+TOMTOM_CUOTA_MENSUAL: int = int(os.environ.get("TOMTOM_CUOTA_MENSUAL", "20000"))
+TOMTOM_MARGEN_CUOTA: float = 0.9  # se planea con el 90 % para absorber desfases de reinicio
+
+# Orquestación
+INTERVALO_MINUTOS: int = 15
+ZONA_HORARIA: str = "America/Mexico_City"  # horas pico y "día" del presupuesto en hora local
 # ---------------------------------------------------------------------------
 # Base de datos (TimescaleDB / PostgreSQL)
 # ---------------------------------------------------------------------------

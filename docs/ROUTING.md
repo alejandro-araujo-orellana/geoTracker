@@ -71,7 +71,7 @@ Por lo tanto **`reverse_cost = -1`** y `directed => true`. Ver `DATABASE.md › 
 
 ### Prerrequisitos
 Ya aplicados (migraciones 004–005): PK + GiST en vértices, `source/target` = nodos OSM,
-`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (009):
+`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (010):
 ```sql
 CREATE TABLE dim_velocidad_tipo_via (
     tipo_via        text PRIMARY KEY,
@@ -126,11 +126,32 @@ ORDER BY r.seq;
 ## Plan de implementación
 
 1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
-2. **Migración de ruteo (009):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
+2. **Migración de ruteo (010):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
 3. **Módulo `src/router.py`** (o servicio en `services/api`): `ruta_mas_rapida(origen, destino) -> Ruta` con snap + Dijkstra + suma de distancia/ETA; GeoJSON de salida.
 4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
 5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.
 6. **Futuro:** A* (`pgr_aStar`) para acelerar; costos predichos por hora del día a partir del histórico en `fact_lecturas_trafico`; penalización de giros.
+
+## Fuentes de tráfico y cuota de TomTom
+
+Cuotas gratuitas **mensuales** (cuenta actual, 2026-11): Flow Segment Data **20 000**; Traffic Flow vector
+tiles **200 000**. Con 440 puntos cada 15 min el ETL consumía ~42 000 peticiones/día: la cuota del mes se
+agotaba en horas (los HTTP 403 de junio-julio).
+
+**B.1 — Deduplicación** (`scripts/deduplicar_puntos.py`): 440 → 207 puntos. Con `zoom=10` TomTom devuelve
+segmentos largos y hasta 12 puntos caían en el mismo.
+
+**B.2 — Pool de peticiones** (`src/presupuesto.py` + tabla `consumo_api`):
+- Presupuesto del día = (cuota × 0.9 − usado antes de hoy) / días restantes del mes (~600–820/día).
+- Cupo del ciclo = presupuesto del día × peso(hora local) / Σ pesos del día: pico 3 (~16 por ciclo),
+  valle 1 (~5), madrugada 0.2 (~1). Lo no gastado se reparte en los días siguientes.
+- Cada intento HTTP cuenta (reintentos incluidos); un 403 bloquea el resto del día.
+- Puntos del ciclo: primero los nunca medidos, luego los de lectura más antigua (rotación).
+- Verificado con un ciclo real: 16/16 peticiones, consumo registrado, inferencia de 67 464 calles.
+
+Limitación: con ~800 peticiones/día cada punto se renueva cada ~3 h en pico y ~10 h en valle; el
+predictor solo usa lecturas de las últimas 6 h, así que la cobertura en vivo es escasa (en el primer
+ciclo, 75 % de las calles quedó fuera del alcance de una fuente).
 
 ## Limitaciones conocidas
 - La congestión de calles residenciales es **inferida** por IDW desde las avenidas medidas, no medida.

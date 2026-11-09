@@ -1,7 +1,7 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–008 y ampliar la red OSM a la zona única el mismo día.
+> y actualizado tras aplicar las migraciones 001–009 y ampliar la red OSM a la zona única el mismo día.
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
@@ -57,8 +57,9 @@ Sistemas de referencia usados:
 Estado: 482 filas, **todas con `geom`** (la migración 003 rellenó las 282 que faltaban desde el JSONB).
 `loader.py` escribe `geom` en cada upsert: inserta los segmentos nuevos y completa la geometría de
 los que la tenían en NULL. Una geometría existente no se sobrescribe.
-35 de estos segmentos quedaron fuera de la zona de estudio (P9) y ya no se miden; se conservan por
-su histórico en `fact_lecturas_trafico`.
+35 de estos segmentos quedaron fuera de la zona de estudio (P9) y otros 233 eran redundantes (devolvían el
+mismo segmento TomTom que otro punto; `scripts/deduplicar_puntos.py`). Hoy se miden 207; el resto se
+conserva por su histórico en `fact_lecturas_trafico`.
 
 ### `fact_lecturas_trafico` — hechos de tráfico (hypertable sobre `timestamp_lectura`)
 | Columna | Tipo | Notas |
@@ -119,6 +120,16 @@ activas. El nodo más cercano a una coordenada se obtiene con `ORDER BY geom <->
 usa el índice GiST. Las columnas `in_edges`/`out_edges` de `pgr_extractVertices` se eliminaron
 (migración 005): se derivan de `dim_calles_osm`.
 
+### `consumo_api` — consumo de APIs externas (migración 009)
+| Columna | Tipo | Notas |
+|---|---|---|
+| `fecha` | `date` | Día en hora local de SLP (PK con `api`) |
+| `api` | `text` | `tomtom_flow_segment` (ETL) o `tomtom_flow_vector_tiles` (prueba de tiles) |
+| `peticiones` | `integer` | Cada intento HTTP, incluidos reintentos |
+| `bloqueado` | `boolean` | Se recibió un 403 ese día: no se vuelve a llamar hasta el siguiente |
+
+La escribe y la lee `src/presupuesto.py` para no exceder la cuota mensual (ver `docs/ROUTING.md` › Fuentes de tráfico).
+
 ### `schema_migrations` — control de migraciones
 `version` (PK, `'001'`…), `nombre`, `aplicada_en`. La escribe `src/migrate.py`.
 
@@ -143,6 +154,8 @@ ciclos cada 15 min). Chunks de **1 día** (los anteriores al cambio son de 7), *
 (`segmentby osm_id`, `orderby timestamp_calculo DESC`; en la copia de prueba 45 MB → 31 MB) y
 **retención de 365 días**. Como TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos,
 `predictor.py` no infiere si la lectura más reciente tiene más de 7 días (`ANTIGUEDAD_MAXIMA`).
+Como fuentes del IDW solo usa lecturas de las últimas 6 h (`VENTANA_LECTURAS`): con el pool cada ciclo
+mide pocos puntos y las lecturas viejas no deben pasar por tráfico actual.
 
 Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 
@@ -168,6 +181,7 @@ BD existente y sobre una BD vacía.
 | 006 | (P6) `UNIQUE (timestamp_calculo, osm_id)` en `trafico_calles` |
 | 007 | (P7) Elimina el índice duplicado `idx_trafico_calles_tiempo` |
 | 008 | (P8) Compresión a 7 días en ambas hypertables; retención de 365 días en `trafico_calles`; chunks diarios en `trafico_calles` |
+| 009 | Tabla `consumo_api` (pool de peticiones a TomTom) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 

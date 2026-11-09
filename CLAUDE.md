@@ -52,6 +52,11 @@ python scripts/osmnx_loader.py
 ```
 `osmnx_loader.py` es idempotente: se puede re-ejecutar sin duplicar la red ni romper el histórico.
 
+Después de regenerar los puntos (paso 1) y de medirlos al menos una vez, quita los que devuelven el mismo
+segmento TomTom: `python scripts/deduplicar_puntos.py`.
+
+Variable opcional `TOMTOM_CUOTA_MENSUAL` (default 20000) si cambia el plan de TomTom.
+
 ### Entorno Python sin instalar nada en el host
 La imagen `geotracker_etl_worker` trae todas las dependencias (incluye osmnx/geopandas):
 ```bash
@@ -79,6 +84,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | `zona.py` | **Zona de estudio única** (bbox de la zona metropolitana de SLP + Soledad). La usan `generador_topologia.py` y `osmnx_loader.py`; nunca definas otro bbox |
 | `extractor.py` | HTTP asíncrono a TomTom; semáforo de 20; backoff exponencial + jitter; timeout 10 s |
 | `migrate.py` | Aplica migraciones pendientes al arrancar |
+| `presupuesto.py` | Pool de peticiones a TomTom: cupo por ciclo según cuota mensual, hora (pico/valle/madrugada) y consumo en `consumo_api`; elige los puntos con lectura más antigua |
 | `transformer.py` | Separa cada respuesta en paquete estático `(id, nombre, coordenadas, wkt)` y dinámico (velocidad, tiempo, congestión) |
 | `loader.py` | Upsert masivo: segmentos (`geom` vía `ST_GeomFromText`, solo completa si era NULL) y lecturas (`ON CONFLICT DO NOTHING`) |
 | `predictor.py` | IDW: última lectura por segmento → puntos cada 100 m → K=5 vecinos (p=2, radio 600 m) sobre centroides OSM activos → `trafico_calles`. Idempotente: `timestamp_calculo` = lectura más reciente; omite ciclos ya inferidos |
@@ -115,7 +121,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. ETL detenido: TomTom devolvía HTTP 403 (cuota agotada: 440 puntos × 96 ciclos ≈ 42 000 req/día). Aplicar `HORAS_PICO` o reducir puntos.
+1. Cuota TomTom: 20 000 peticiones/MES de Flow Segment Data. El ETL ya respeta un pool (`presupuesto.py`, 207 puntos deduplicados); listo para volver a encenderse.
 2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).
