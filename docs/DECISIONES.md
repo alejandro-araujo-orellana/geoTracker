@@ -69,6 +69,21 @@ de las vías principales) con diferencia media de 0.05 contra Segment Data.
 a 2–11 m entre sí, y en 37 de 50 pares tertiary con `traffic_level` distinto: el tráfico es por sentido, igual
 que las aristas dirigidas de OSM. La prueba original (sin sentido) mezclaba ambos.
 
+## D11 — Asociación tile → arista en forma de conjunto, con índice en la tabla temporal (2026-11-09)
+**Decisión:** la asociación calcula una vez el punto medio y rumbo de cada arista en una tabla temporal
+**indexada (GiST) y analizada**, y une por `ST_DWithin`; solo los pares cercanos calculan rumbo.
+**Por qué:** la primera versión (`LATERAL ... ORDER BY <-> LIMIT 1`) y la segunda (JOIN sin índice ni
+estadísticas en la tabla temporal) tardaban **más de 7 minutos** por pasada: el planificador hacía el
+producto cruzado de 67 k aristas × 4 k tramos (~280 M pares) calculando rumbos. `EXPLAIN ANALYZE` mostró
+que con el índice baja a **1.3 s** (3.6 s con la carga de tramos), el mismo resultado.
+**Lección:** toda tabla temporal que participe en un JOIN espacial necesita índice + `ANALYZE`.
+
+## D12 — Pasada de tiles: todo o nada, y la fuente principal no bloquea a la secundaria (2026-11-09)
+**Decisión:** cada ciclo hace la pasada completa de tiles (49) solo si el presupuesto del día alcanza; un
+fallo en tiles se registra y el ciclo sigue con Segment Data; el predictor corre si alguna fuente trajo datos.
+**Por qué:** una pasada parcial dejaría zonas sin medir en el mismo instante. Con 200 000/mes el
+presupuesto diario (~6 000–8 000) cubre los 96 ciclos (4 704 tiles), así que no hace falta ponderar por hora.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

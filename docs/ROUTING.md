@@ -71,7 +71,7 @@ Por lo tanto **`reverse_cost = -1`** y `directed => true`. Ver `DATABASE.md › 
 
 ### Prerrequisitos
 Ya aplicados (migraciones 004–005): PK + GiST en vértices, `source/target` = nodos OSM,
-`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (010):
+`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (011):
 ```sql
 CREATE TABLE dim_velocidad_tipo_via (
     tipo_via        text PRIMARY KEY,
@@ -126,7 +126,7 @@ ORDER BY r.seq;
 ## Plan de implementación
 
 1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
-2. **Migración de ruteo (010):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
+2. **Migración de ruteo (011):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
 3. **Módulo `src/router.py`** (o servicio en `services/api`): `ruta_mas_rapida(origen, destino) -> Ruta` con snap + Dijkstra + suma de distancia/ETA; GeoJSON de salida.
 4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
 5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.
@@ -166,8 +166,24 @@ ciclo, 75 % de las calles quedó fuera del alcance de una fuente).
 | Cobertura residential | 8 % (sigue necesitando IDW) |
 | Coincidencia con Flow Segment Data (16 segmentos, ~10 min de diferencia) | diferencia media 0.052, máx 0.211; detectó la congestión de Av. Constitución (0.30 vs 0.32) |
 
-Pendiente de la prueba: asociación por sentido de circulación (hoy se asocia el tramo más cercano sin
-importar el sentido) y verificar que los términos de TomTom permiten almacenar datos derivados de tiles.
+**Resultado:** los tiles pasan a ser la fuente principal (D8). Pendiente: verificar que los términos de
+TomTom permiten almacenar datos derivados de tiles.
+
+### Implementación (fuente principal)
+
+`main.ciclo_etl` en cada ciclo de 15 min:
+1. **Tiles** (`ciclo_tiles`): pool propio (200 000/mes, todo o nada por pasada, D12) →
+   `extractor_tiles.extraer` (49 tiles asíncronos) → `asociador.asociar_y_guardar` → `fact_flujo_aristas`.
+2. **Segment Data** (`ciclo_segment_data`): fuente secundaria dentro de su pool (B.2).
+3. **Predictor** si alguna fuente trajo datos.
+
+Asociación **dirigida** (D9): cada línea del tile va a la arista OSM a < 12 m de su punto medio con el
+**mismo rumbo** (< 35° sobre 360°). Validado con una pasada real:
+- Aristas oneway: 8 668 asociadas con la regla dirigida vs 2 880 con los tramos invertidos (la calzada
+  contraria de avenidas con camellón, que la regla dirigida evita).
+- 3 059 pares de doble sentido medidos; en 32 % el nivel difiere por sentido.
+- Cobertura: motorway/trunk/primary ~100 %, secondary 98 %, tertiary 84 %, residential 8 %; 15 037 aristas.
+- Tiempo: pasada de tiles + asociación ≈ 6 s (D11).
 
 ## Limitaciones conocidas
 - La congestión de calles residenciales es **inferida** por IDW desde las avenidas medidas, no medida.

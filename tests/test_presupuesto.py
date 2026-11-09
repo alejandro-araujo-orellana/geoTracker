@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from presupuesto import Cupo, cupo_ciclo, peso_hora, presupuesto_dia, seleccionar_puntos
+from presupuesto import Cupo, cupo_ciclo, cupo_pasada, peso_hora, presupuesto_dia, seleccionar_puntos
 
 PICO = {7, 8, 9, 13, 14, 17, 18, 19, 20}
 
@@ -50,6 +50,24 @@ class TestCupoCiclo:
     def test_nunca_supera_lo_que_queda_hoy(self):
         assert cupo_ciclo(600, restante_hoy=5, hora_local=18, intervalo_min=15, horas_pico=PICO) == 5
         assert cupo_ciclo(600, restante_hoy=0, hora_local=18, intervalo_min=15, horas_pico=PICO) == 0
+
+
+class TestCupoPasada:
+    """Tiles: una pasada parcial deja huecos en el mapa, así que es todo o nada."""
+
+    def test_alcanza_para_la_pasada_completa(self):
+        assert cupo_pasada(presupuesto_del_dia=6_000, usado_hoy=100, tiles_por_pasada=49) == 49
+
+    def test_no_alcanza_no_se_hace(self):
+        assert cupo_pasada(presupuesto_del_dia=6_000, usado_hoy=5_960, tiles_por_pasada=49) == 0
+
+    def test_justo_lo_necesario(self):
+        assert cupo_pasada(presupuesto_del_dia=6_000, usado_hoy=5_951, tiles_por_pasada=49) == 49
+
+    def test_cuota_mensual_de_tiles_alcanza_para_todos_los_ciclos(self):
+        # 200 000 × 0.9 / 30 días = 6 000/día ≥ 96 ciclos × 49 tiles = 4 704
+        del_dia = presupuesto_dia(200_000, 0.9, usado_antes_de_hoy=0, hoy=date(2026, 11, 1))
+        assert del_dia >= 96 * 49
 
 
 class TestSeleccionarPuntos:

@@ -28,6 +28,7 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 API_FLOW_SEGMENT = "tomtom_flow_segment"
+API_FLOW_TILES = "tomtom_flow_vector_tiles"
 
 PESO_PICO = 3.0
 PESO_VALLE = 1.0
@@ -61,6 +62,15 @@ def cupo_ciclo(presupuesto_del_dia: int, restante_hoy: int, hora_local: int,
     if presupuesto_del_dia > 0 and cupo == 0:
         cupo = 1
     return max(0, min(cupo, restante_hoy))
+
+
+def cupo_pasada(presupuesto_del_dia: int, usado_hoy: int, tiles_por_pasada: int) -> int:
+    """
+    Tiles: todo o nada. Una pasada parcial dejaría zonas sin medir en el mismo
+    instante, así que solo se hace si alcanza para la pasada completa.
+    Con la cuota actual (200 000/mes) alcanza para todos los ciclos del día.
+    """
+    return tiles_por_pasada if presupuesto_del_dia - usado_hoy >= tiles_por_pasada else 0
 
 
 def seleccionar_puntos(coordenadas: dict, ultima_lectura: dict, n: int) -> dict:

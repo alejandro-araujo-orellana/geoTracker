@@ -58,7 +58,11 @@ Después de regenerar los puntos (paso 1) y de medirlos al menos una vez, quita 
 segmento TomTom: `python scripts/deduplicar_puntos.py`. `scripts/prueba_vector_tiles.py` es una prueba
 de la fuente alternativa (vector tiles); requiere `pip install mapbox-vector-tile==2.1.0`.
 
-Variable opcional `TOMTOM_CUOTA_MENSUAL` (default 20000) si cambia el plan de TomTom.
+Variables opcionales si cambia el plan de TomTom: `TOMTOM_CUOTA_MENSUAL` (Segment Data, default 20000) y
+`TOMTOM_TILES_CUOTA_MENSUAL` (vector tiles, default 200000).
+
+Los tests de `tests/test_asociador_db.py` crean y borran una BD temporal en el PostgreSQL de `DB_*`; se
+saltan si no hay BD alcanzable.
 
 ### Entorno Python sin instalar nada en el host
 La imagen `geotracker_etl_worker` trae todas las dependencias (incluye osmnx/geopandas):
@@ -85,7 +89,9 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 |---|---|
 | `config.py` | Variables de entorno, carga de `vialidades_maestras.json`, constantes (`HORAS_PICO`, límites TomTom) |
 | `zona.py` | **Zona de estudio única** (bbox de la zona metropolitana de SLP + Soledad). La usan `generador_topologia.py` y `osmnx_loader.py`; nunca definas otro bbox |
-| `extractor.py` | HTTP asíncrono a TomTom; semáforo de 20; backoff exponencial + jitter; timeout 10 s |
+| `extractor_tiles.py` | **Fuente principal** (D8): pasada asíncrona de 49 Traffic Flow vector tiles (zoom 14) → tramos con `traffic_level` y `road_closure` |
+| `asociador.py` | Asocia tramos de tiles a aristas OSM **dirigidas** (D9) en PostGIS → `fact_flujo_aristas` |
+| `extractor.py` | Fuente secundaria: Flow Segment Data. HTTP asíncrono; semáforo de 20; backoff exponencial + jitter; timeout 10 s |
 | `migrate.py` | Aplica migraciones pendientes al arrancar |
 | `presupuesto.py` | Pool de peticiones a TomTom: cupo por ciclo según cuota mensual, hora (pico/valle/madrugada) y consumo en `consumo_api`; elige los puntos con lectura más antigua |
 | `transformer.py` | Separa cada respuesta en paquete estático `(id, nombre, coordenadas, wkt)` y dinámico (velocidad, tiempo, congestión) |
@@ -124,7 +130,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. Cuota TomTom: 20 000 peticiones/MES de Flow Segment Data. El ETL ya respeta un pool (`presupuesto.py`, 207 puntos deduplicados); listo para volver a encenderse. Evaluar migrar a vector tiles (200 000/mes, ver `docs/ROUTING.md` › Fuentes de tráfico).
+1. Reestructuración a vector tiles (D8) en curso: ingesta lista (`fact_flujo_aristas`); falta el predictor v3 que use las aristas medidas. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

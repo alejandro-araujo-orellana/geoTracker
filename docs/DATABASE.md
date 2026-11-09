@@ -1,7 +1,7 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–009 y ampliar la red OSM a la zona única el mismo día.
+> y actualizado tras aplicar las migraciones 001–010 y ampliar la red OSM a la zona única el mismo día.
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
@@ -75,6 +75,19 @@ Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Chunks de 7 días. Compresión a
 (`segmentby id_segmento`, `orderby timestamp_lectura DESC`). **Sin retención**: son los datos crudos y
 la base para costos históricos por hora del día.
 
+### `fact_flujo_aristas` — tráfico medido por arista desde vector tiles (hypertable, migración 010)
+| Columna | Tipo | Notas |
+|---|---|---|
+| `timestamp_lectura` | `timestamptz` NOT NULL | Inicio de la pasada de tiles (UTC, al segundo) |
+| `osm_id` | `bigint` NOT NULL FK → `dim_calles_osm` | Arista dirigida medida |
+| `nivel_relativo` | `double precision` NOT NULL, 0..1 | `traffic_level` de TomTom = velocidad actual / libre. Congestión equivalente = 1 / nivel |
+| `cerrada` | `boolean` NOT NULL | `road_closure` del tile |
+
+`UNIQUE (timestamp_lectura, osm_id)`; chunks de 1 día; compresión a 7 días (`segmentby osm_id`); **sin
+retención** (datos crudos, D5). La escribe `src/asociador.py` (regla dirigida, D9/D11). Volumen: ~15 000
+filas por pasada (primary/trunk/motorway ~100 %, secondary 98 %, tertiary 84 %, residential 8 %).
+La geometría de los tiles no se guarda.
+
 ### `dim_calles_osm` — red vial completa de OSM (aristas del grafo)
 | Columna | Tipo | Notas |
 |---|---|---|
@@ -124,7 +137,7 @@ usa el índice GiST. Las columnas `in_edges`/`out_edges` de `pgr_extractVertices
 | Columna | Tipo | Notas |
 |---|---|---|
 | `fecha` | `date` | Día en hora local de SLP (PK con `api`) |
-| `api` | `text` | `tomtom_flow_segment` (ETL) o `tomtom_flow_vector_tiles` (prueba de tiles) |
+| `api` | `text` | `tomtom_flow_segment` (fuente secundaria) o `tomtom_flow_vector_tiles` (fuente principal) |
 | `peticiones` | `integer` | Cada intento HTTP, incluidos reintentos |
 | `bloqueado` | `boolean` | Se recibió un 403 ese día: no se vuelve a llamar hasta el siguiente |
 
@@ -182,6 +195,7 @@ BD existente y sobre una BD vacía.
 | 007 | (P7) Elimina el índice duplicado `idx_trafico_calles_tiempo` |
 | 008 | (P8) Compresión a 7 días en ambas hypertables; retención de 365 días en `trafico_calles`; chunks diarios en `trafico_calles` |
 | 009 | Tabla `consumo_api` (pool de peticiones a TomTom) |
+| 010 | Hypertable `fact_flujo_aristas` (tráfico por arista desde vector tiles) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 

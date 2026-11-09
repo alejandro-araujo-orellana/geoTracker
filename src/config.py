@@ -21,6 +21,10 @@ TOMTOM_MAX_REINTENTOS: int = 4
 TOMTOM_CUOTA_MENSUAL: int = int(os.environ.get("TOMTOM_CUOTA_MENSUAL", "20000"))
 TOMTOM_MARGEN_CUOTA: float = 0.9  # se planea con el 90 % para absorber desfases de reinicio
 
+# Traffic Flow vector tiles (fuente principal, D8): 200 000 gratis al MES.
+TOMTOM_TILES_CUOTA_MENSUAL: int = int(os.environ.get("TOMTOM_TILES_CUOTA_MENSUAL", "200000"))
+TILES_ZOOM: int = 14  # 49 tiles por pasada sobre la zona de estudio
+
 # Orquestación
 INTERVALO_MINUTOS: int = 15
 ZONA_HORARIA: str = "America/Mexico_City"  # horas pico y "día" del presupuesto en hora local

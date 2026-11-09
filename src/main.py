@@ -1,14 +1,16 @@
 import time
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 
 # Importamos la configuración y los módulos "tontos"
 import config
+import asociador
 import extractor
+import extractor_tiles
 import transformer
 import loader
 import migrate
@@ -19,10 +21,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Planificación de peticiones (pools independientes por API)
+# ---------------------------------------------------------------------------
+def planificar_tiles(engine, ahora_local: datetime) -> presupuesto.Cupo:
+    """Cupo de tiles de este ciclo: la pasada completa o nada (D8)."""
+    hoy = ahora_local.date()
+    usado_antes, usado_hoy, bloqueado = presupuesto.leer_consumo(engine, hoy, api=presupuesto.API_FLOW_TILES)
+    if bloqueado:
+        logger.warning("Tiles: TomTom respondió 403 hoy (%s); sin pasadas hasta mañana.", hoy)
+        return presupuesto.Cupo(0)
+    del_dia = presupuesto.presupuesto_dia(config.TOMTOM_TILES_CUOTA_MENSUAL, config.TOMTOM_MARGEN_CUOTA, usado_antes, hoy)
+    n_tiles = len(extractor_tiles.tiles_de_la_zona(config.TILES_ZOOM))
+    cupo = presupuesto.cupo_pasada(del_dia, usado_hoy, n_tiles)
+    logger.info("Presupuesto tiles: mes %d/%d antes de hoy | hoy %d/%d | pasada %s",
+                usado_antes, config.TOMTOM_TILES_CUOTA_MENSUAL, usado_hoy, del_dia,
+                f"{n_tiles} tiles" if cupo else "omitida (sin presupuesto)")
+    return presupuesto.Cupo(cupo)
+
+
 def planificar_ciclo(engine, ahora_local: datetime) -> tuple[dict, presupuesto.Cupo]:
     """
-    Decide qué puntos consultar en este ciclo y con cuántas peticiones (B.2).
-    Devuelve (puntos, cupo); puntos vacío si no hay presupuesto.
+    Flow Segment Data (fuente secundaria): qué puntos consultar en este ciclo y
+    con cuántas peticiones (B.2). Devuelve (puntos, cupo); puntos vacío si no hay presupuesto.
     """
     hoy = ahora_local.date()
     usado_antes, usado_hoy, bloqueado = presupuesto.leer_consumo(engine, hoy)
@@ -42,16 +63,31 @@ def planificar_ciclo(engine, ahora_local: datetime) -> tuple[dict, presupuesto.C
     return puntos, presupuesto.Cupo(n)
 
 
-def ciclo_etl(engine):
-    logger.info("=== Iniciando Ciclo ETL ===")
-    ahora_local = datetime.now(ZoneInfo(config.ZONA_HORARIA))
+# ---------------------------------------------------------------------------
+# Fuentes
+# ---------------------------------------------------------------------------
+def ciclo_tiles(engine, ahora_local: datetime) -> int:
+    """Fuente principal: pasada de vector tiles → fact_flujo_aristas. Devuelve aristas medidas."""
+    cupo = planificar_tiles(engine, ahora_local)
+    if cupo.limite == 0:
+        return 0
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0)
+    try:
+        tramos, _ = asyncio.run(extractor_tiles.extraer(config.TOMTOM_API_KEY, config.TILES_ZOOM, cupo))
+    finally:
+        presupuesto.registrar_consumo(engine, ahora_local.date(), cupo.usadas, cupo.bloqueado,
+                                      api=presupuesto.API_FLOW_TILES)
+    return asociador.asociar_y_guardar(engine, tramos, timestamp)
 
+
+def ciclo_segment_data(engine, ahora_local: datetime) -> bool:
+    """Fuente secundaria: Flow Segment Data dentro de su pool. Devuelve True si cargó datos."""
     puntos, cupo = planificar_ciclo(engine, ahora_local)
     if not puntos:
-        logger.info("Sin presupuesto para este ciclo. Se omite la extracción.")
-        return
+        logger.info("Segment Data: sin presupuesto para este ciclo.")
+        return False
 
-    # 1. EXTRACCIÓN — el consumo se registra aunque la extracción falle
+    # El consumo se registra aunque la extracción falle
     try:
         datos_crudos = asyncio.run(
             extractor.run_extraction(
@@ -69,17 +105,34 @@ def ciclo_etl(engine):
         logger.info("Peticiones consumidas en el ciclo: %d/%d", cupo.usadas, cupo.limite)
 
     if not datos_crudos:
-        logger.warning("No se obtuvieron datos. Omitiendo transformación y carga.")
-        return
+        logger.warning("Segment Data: no se obtuvieron datos.")
+        return False
 
-    # 2. TRANSFORMACIÓN
     datos_estaticos, datos_dinamicos = transformer.transform(datos_crudos)
+    return loader.load(datos_estaticos, datos_dinamicos, engine)
 
-    # 3. CARGA
-    loader.load(datos_estaticos, datos_dinamicos, engine)
-    logger.info("=== Ciclo ETL Completado ===")
 
-    # 4. PREDICTOR
+def ciclo_etl(engine):
+    logger.info("=== Iniciando Ciclo ETL ===")
+    ahora_local = datetime.now(ZoneInfo(config.ZONA_HORARIA))
+
+    # 1. Fuente principal (tiles). Un fallo aquí no debe impedir la secundaria.
+    try:
+        aristas_medidas = ciclo_tiles(engine, ahora_local)
+    except Exception:
+        logger.exception("Falló la pasada de tiles; se continúa con Segment Data.")
+        aristas_medidas = 0
+
+    # 2. Fuente secundaria (Segment Data)
+    hubo_segment_data = ciclo_segment_data(engine, ahora_local)
+
+    if not aristas_medidas and not hubo_segment_data:
+        logger.warning("Sin datos nuevos de ninguna fuente. Se omite el predictor.")
+        return
+    logger.info("=== Ciclo ETL Completado (tiles: %d aristas | segment data: %s) ===",
+                aristas_medidas, "sí" if hubo_segment_data else "no")
+
+    # 3. PREDICTOR
     predictor.ejecutar(engine)
     logger.info("==== Predictor Completado ===")
 

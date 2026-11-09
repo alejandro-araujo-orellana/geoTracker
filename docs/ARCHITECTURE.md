@@ -40,7 +40,7 @@ Graciano Sánchez.
 
 ## 2. Estándares de código (Python)
 
-* **Arquitectura modular:** responsabilidad única por módulo: `config`, `extractor`, `transformer`, `loader`, `predictor` y (próximo) `router`. Los scripts de preparación viven en `scripts/`. ✅
+* **Arquitectura modular:** responsabilidad única por módulo: `config`, `extractor_tiles` + `asociador` (fuente principal), `extractor` + `transformer` + `loader` (fuente secundaria), `presupuesto`, `predictor` y (próximo) `router`. Los scripts de preparación viven en `scripts/`. ✅
 * **E/S de red asíncrona en el ETL:** `aiohttp` + `asyncio`. `requests` solo se permite en scripts de preparación one-shot (`scripts/`). ✅
 * **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ✅ en el ETL (D10). ⚠️ `services/api/requirements.txt` aún usa `>=`.
 * **Logging:** prohibido `print()` fuera de bloques `if __name__ == "__main__"` de prueba. Usar `logging` con nivel y timestamp; configurar `basicConfig` **solo** en los puntos de entrada (`main.py`, scripts), no en módulos. ⚠️ `config.py:38`; `basicConfig` repetido en loader/transformer/predictor.
@@ -72,4 +72,4 @@ Graciano Sánchez.
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (99 tests en verde al 2026-11-09)
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (120 tests en verde al 2026-11-09). La lógica que vive en SQL (asociación espacial) se prueba contra PostgreSQL real (`tests/test_asociador_db.py`, BD temporal).
