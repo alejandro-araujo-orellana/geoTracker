@@ -2,9 +2,12 @@ version: '3.8'
 
 services:
   timescaledb:
-    image: timescale/timescaledb-ha:pg15-latest
+    build:
+      context: ./db
+      dockerfile:  Dockerfile
+    #image: timescale/timescaledb-ha:pg15-latest
     container_name: trafico_db
-#    restart: always
+    #restart: always
     environment:
       - POSTGRES_USER=user
       - POSTGRES_PASSWORD=dev_password_seguro

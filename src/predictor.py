@@ -7,10 +7,17 @@ Posición en el pipeline:
     ETL (TomTom → fact_lecturas_trafico)  →  predictor.py  →  trafico_inferido  →  Grafana
 
 Responsabilidad:
-    Tomar las lecturas más recientes de las avenidas medidas y generar una
-    superficie continua de congestión sobre una grilla que cubre la zona
-    metropolitana de San Luis Potosí. Cada punto de la grilla recibe un nivel
+    Tomar las lecturas más recientes de las avenidas medidas e inferir
+    el nivel de congestion sobre la red vila completa de SLP descargada
+    de OpenStreetMap en la tabla dim_calles_osm, se recibe un nivel
     de congestión inferido por distancia ponderada inversa (IDW).
+
+    version 2 - cambio de lienzo, antes el IDW pintaba sobre una grilla
+    anonima de puntos en el espacio que representaba el trafico inferido.
+    Ahora pinta sobre los centroides de cada calle de la red vial del OSM
+    trafico_calles, permitiendonos responder a preguntas mas exactas como
+    una Calle en especifico X, en lugar de preguntar en base a puntos 
+    lat/lon.
 
 Dependencias:
     pip install geopandas shapely scipy numpy sqlalchemy psycopg2-binary pandas
@@ -49,7 +56,7 @@ DB_URL = config.DB_URL
 # Estos valores cubren la mancha urbana principal. Amplíalos si tu red de avenidas
 # cubre zonas periféricas como Soledad de Graciano Sánchez.
 #BBOX = (-101.05, 22.08, -100.89, 22.21)
-BBOX = (-101.03, 22.11, -100.96, 22.19)
+BBOX = (22.101,-101.045,22.219,-100.906)
 
 # Resolución de la grilla: distancia entre puntos en METROS.
 # 200m → grilla densa (~2500 puntos sobre SLP), buena para heatmap detallado.
@@ -137,7 +144,7 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
 # Distancia en metros entre puntos de muestreo sobre cada LineString.
 # 150m significa que un segmento de 600m genera 4 puntos fuente en lugar de 1.
 # Valores menores = cobertura más densa = heatmap más continuo.
-MUESTREO_LINEA_M = 75
+MUESTREO_LINEA_M = 100
 
 def muestrear_puntos_linea(gdf_fuentes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
@@ -180,7 +187,7 @@ def muestrear_puntos_linea(gdf_fuentes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                 "id_segmento":      fila.id_segmento,
                 "nombre_via":       fila.nombre_via,
                 "nivel_congestion": fila.nivel_congestion,
-                "geom":         fila["geom"].centroid,
+                "geom":             linea.centroid,
             })
             continue
 
@@ -205,54 +212,43 @@ def muestrear_puntos_linea(gdf_fuentes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 3 — Generar la grilla de puntos objetivo
+# Etapa 3 — Leer los centroides de la red vial OSM
 # ---------------------------------------------------------------------------
 
-def generar_grilla(bbox_wgs84: tuple, resolucion_m: int) -> gpd.GeoDataFrame:
+def leer_centroides_osm(engine) -> gpd.GeoDataFrame:
     """
-    Crea una malla regular de puntos sobre la zona metropolitana.
+    Trae todos los segmentos de dim_calles_osm con su centroide
+    precalculado en metros (columna centroide_m, poblada por osmnx_loader.py)
 
-    El proceso es:
-    1. Crear un polígono bounding box en WGS84.
-    2. Proyectarlo a UTM 14N para poder aplicar la resolución en metros.
-    3. Generar puntos en una cuadrícula con paso = resolucion_m.
-    4. Guardar tanto la geometría métrica (para el IDW) como las coordenadas
-       WGS84 originales (para insertar en la DB y visualizar en Grafana).
+    No se recalcula el centroide aqui, osmnx_loader ya hizo la reproyeccion una sola vez al cargar
+    red vial. Reproyectando mas de 24k geometrias en cada ciclo ETL cada 15min seria innecesario,
+    leemos el valor calculado ya registrado en tablas.
 
-    Los puntos de la grilla son el "lienzo en blanco" sobre el que el IDW
-    va a pintar los valores de congestión inferidos.
+    Retorna: GeoDataForm con columnas:
+        osm_id, nombre, tipo_via, geom (Point en EPSG:32614, columna activa)
     """
-    log.info(f"Etapa 3: generando grilla con resolución {resolucion_m}m...")
+    log.info(f"Etapa 3: leyendo centroides de la red vial OSM (dim_calles_osm)...")
 
-    # Polígono bbox en WGS84
-    bbox_poly = gpd.GeoDataFrame(
-        geometry=[box(*bbox_wgs84)],
-        crs="EPSG:4326"
-    )
+    sql = """
+        SELECT
+            osm_id,
+            nombre,
+            tipo_via,
+            centroide_m
+        FROM dim_calles_osm
+        WHERE centroide_m IS NOT NULL
+    """
+    with engine.connect() as conn:
+        conexion_nativa = conn.connection
+        gdf = gpd.read_postgis(sql, con=conexion_nativa, geom_col="centroide_m")
 
-    # Proyectar a metros para que np.arange trabaje en metros reales
-    bbox_m = bbox_poly.to_crs(epsg=SRID_METRICO)
-    minx, miny, maxx, maxy = bbox_m.total_bounds
+    #read_postgis ya sabe que centroide_m esta en ESPG:32614 pq
+    #dim_calles_osm lo declaro asi al insertar (ST_GeomFromText con SRID 32614), verificamos
+    if gdf.crs is None or gdf.crs.to_epsg() != SRID_METRICO:
+        gdf = gdf.set_crs(epsg=SRID_METRICO, allow_override=True)
 
-    # Crear coordenadas de la malla
-    xs = np.arange(minx, maxx, resolucion_m)
-    ys = np.arange(miny, maxy, resolucion_m)
-    xx, yy = np.meshgrid(xs, ys)
-    coords_m = np.column_stack([xx.ravel(), yy.ravel()])
-
-    # GeoDataFrame métrico (para el cálculo IDW)
-    gdf_grilla = gpd.GeoDataFrame(
-        geometry=[Point(x, y) for x, y in coords_m],
-        crs=f"EPSG:{SRID_METRICO}"
-    )
-
-    # Guardar las coordenadas WGS84 para la inserción en DB
-    gdf_grilla_wgs = gdf_grilla.to_crs(epsg=4326)
-    gdf_grilla["lat"] = gdf_grilla_wgs.geometry.y
-    gdf_grilla["lon"] = gdf_grilla_wgs.geometry.x
-
-    log.info(f"  → {len(gdf_grilla)} puntos de grilla generados.")
-    return gdf_grilla
+    log.info(f"  → {len(gdf):,} calles OSM cargadas como puntos objetivo.")
+    return gdf
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +256,7 @@ def generar_grilla(bbox_wgs84: tuple, resolucion_m: int) -> gpd.GeoDataFrame:
 # ---------------------------------------------------------------------------
 
 def aplicar_idw(
-    gdf_grilla: gpd.GeoDataFrame,
+    gdf_objetivo: gpd.GeoDataFrame,
     gdf_fuentes: gpd.GeoDataFrame,
     k: int,
     potencia: float,
@@ -295,7 +291,7 @@ def aplicar_idw(
         [geom.coords[0] for geom in gdf_fuentes.geometry]
     )
     coords_objetivo = np.array(
-        [geom.coords[0] for geom in gdf_grilla.geometry]
+        [geom.coords[0] for geom in gdf_objetivo.geometry]
     )
     valores_fuentes = gdf_fuentes["nivel_congestion"].values.astype(float)
 
@@ -305,6 +301,12 @@ def aplicar_idw(
     # Consulta: K vecinos más cercanos para cada punto objetivo
     # distances: (n_objetivo, K), indices: (n_objetivo, K)
     distancias, indices = tree.query(coords_objetivo, k=min(k, len(gdf_fuentes)))
+
+    #Si k=1, scipy devuelve arrays 1D en lugar de 2D, normalizamos forma
+    #para que el resto del codigo funcione igual al asumir columnas k
+    if distancias.ndim == 1:
+        distancias = distancias.reshape(-1,1)
+        indices = indices.reshape(-1,1)
 
     # Manejo de distancia cero (punto exactamente sobre una fuente)
     # En ese caso el peso de esa fuente es infinito → se toma su valor directo.
@@ -347,56 +349,55 @@ def aplicar_idw(
 
 
 # ---------------------------------------------------------------------------
-# Etapa 5 — Escribir resultados en trafico_inferido
+# Etapa 5 — Escribir resultados en trafico_calles
 # ---------------------------------------------------------------------------
 
 def guardar_resultados(
     engine,
-    gdf_grilla: gpd.GeoDataFrame,
+    gdf_objetivo: gpd.GeoDataFrame,
     congestion_inferida: np.ndarray,
     timestamp_calculo: datetime,
 ) -> None:
     """
-    Inserta los puntos inferidos en la tabla trafico_inferido.
+    Inserta los puntos inferidos en la tabla trafico_calles.
 
-    Por qué INSERT en lote y no fila a fila: un único executemany() con
-    todos los puntos hace una sola transacción de red hacia PostgreSQL.
-    Insertar fila a fila con 2500 puntos haría 2500 round-trips de red.
-
-    La columna segmento_origen_id se deja NULL para los puntos de grilla,
-    porque no corresponden a un segmento específico. Cuando en fases futuras
-    infieras sobre calles secundarias reales, ahí sí tendrá valor.
+    A diferencia de lo que habia de la version 1 con trafico_inferido con
+    lat y lon sueltos, aqui cada fila referencia un osm_id real de 
+    dim_calles_osm, Grafana asi podra hacer JOIN para obtener nombre,
+    tipo de via y geometria completa de cada calle.
     """
-    log.info("Etapa 5: guardando resultados en trafico_inferido...")
+    log.info("Etapa 5: guardando resultados en trafico_calles...")
 
     registros = [
         {
             "timestamp_calculo":    timestamp_calculo,
-            "segmento_origen_id":   None,          # punto de grilla, sin segmento fijo
+            "osm_id":   int(row.osm_id),
             "nivel_congestion_inf": float(c),
-            "distancia_metros":     None,           # sin vecino único referenciado
-            "lat":                  float(row.lat),
-            "lon":                  float(row.lon),
-            "metodo_inferencia":    "IDW_GRID",
+            "metodo_inferencia":    "IDW_OSM",
         }
-        for (_, row), c in zip(gdf_grilla.iterrows(), congestion_inferida)
+        for (_, row), c in zip(gdf_objetivo.iterrows(), congestion_inferida)
     ]
 
     insert_sql = text("""
-        INSERT INTO trafico_inferido
-            (timestamp_calculo, segmento_origen_id,
-             nivel_congestion_inf, distancia_metros,
-             lat, lon, metodo_inferencia)
+        INSERT INTO trafico_calles
+            (timestamp_calculo, osm_id,
+             nivel_congestion_inf, metodo_inferencia)
         VALUES
-            (:timestamp_calculo, :segmento_origen_id,
-             :nivel_congestion_inf, :distancia_metros,
-             :lat, :lon, :metodo_inferencia)
+            (:timestamp_calculo, :osm_id,
+             :nivel_congestion_inf, :metodo_inferencia)
     """)
 
-    with engine.begin() as conn:
-        conn.execute(insert_sql, registros)
+    LOTE = 1000
+    total = len(registros)
+    insertados = 0
 
-    log.info(f"  → {len(registros)} puntos insertados correctamente.")
+    with engine.begin() as conn:
+        for i in range(0, total, LOTE):
+             lote = registros[i:i + LOTE]
+             conn.execute(insert_sql, lote)
+             insertados += len(lote)
+
+    log.info(f"  → {insertados:,} calles insertadas correctamente en trafico_calles")
 
 
 # ---------------------------------------------------------------------------
@@ -420,13 +421,13 @@ def ejecutar(engine):
     gdf_fuentes_m = muestrear_puntos_linea(gdf_fuentes_geo)
 
     # Etapa 3
-    gdf_grilla = generar_grilla(BBOX, GRID_RESOLUTION_M)
+    gdf_calles_osm = leer_centroides_osm(engine)
 
     # Etapa 4
-    congestion = aplicar_idw(gdf_grilla, gdf_fuentes_m, K_VECINOS, POTENCIA_IDW, DISTANCIA_MAX_M)
+    congestion = aplicar_idw(gdf_calles_osm, gdf_fuentes_m, K_VECINOS, POTENCIA_IDW, DISTANCIA_MAX_M)
 
     # Etapa 5
-    guardar_resultados(engine, gdf_grilla, congestion, timestamp)
+    guardar_resultados(engine, gdf_calles_osm, congestion, timestamp)
 
     log.info("=== predictor.py finalizado ===")
 

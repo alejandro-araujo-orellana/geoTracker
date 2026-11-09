@@ -10,3 +10,4 @@ geopandas
 pandas
 scipy
 numpy
+osmnx

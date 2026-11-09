@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 def main():
     # Bounding Box de la zona urbana de San Luis Potosí
     # (Sur_Lat, Oeste_Lon, Norte_Lat, Este_Lon)
-    BBOX_SLP = "22.08,-101.05,22.21,-100.89"
+    BBOX_SLP = "22.101,-101.045,22.219,-100.906"
     DISTANCIA_MUESTREO_METROS = 1000 # Un punto de tráfico cada kilómetro y medio
     ARCHIVO_SALIDA = BASE_DIR / "data" / "vialidades_maestras.json"
 

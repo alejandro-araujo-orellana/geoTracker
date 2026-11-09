@@ -1,5 +1,12 @@
 # Usar una imagen oficial de Python ligera
 FROM python:3.11-slim
+FROM timescale/timescaledb-ha:pg15-latest
+
+USER root
+RUN apt-get update && \
+    apt-get install -y postgresql-15-pgrouting && \
+    rm -rf /var/lib/apt/lists/*
+USER postgres
 
 # Instalar dependencias del sistema necesarias para compilar psycopg2
 RUN apt-get update && apt-get install -y libpq-dev gcc gdal-bin libgdal-dev && rm -rf /var/lib/apt/lists/*
