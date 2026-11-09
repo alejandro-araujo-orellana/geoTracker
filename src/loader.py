@@ -1,8 +1,9 @@
 import logging
-from sqlalchemy import Column, Float, MetaData, Table, Text, UniqueConstraint, text
+from sqlalchemy import Column, Float, MetaData, Table, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.types import UserDefinedType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,8 +14,17 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Definición de tablas (SQLAlchemy Core)
-# create_tables() las crea en la BD si no existen.
+# Solo describen las columnas que escribe este módulo. El esquema real lo
+# crean las migraciones de db/migrations/ (ver migrate.py).
 # ---------------------------------------------------------------------------
+class _Geometry(UserDefinedType):
+    """Columna PostGIS geometry (sin depender de GeoAlchemy2)."""
+    cache_ok = True
+
+    def get_col_spec(self, **kw):
+        return "geometry"
+
+
 _metadata = MetaData()
 
 _dim_segmentos_viales = Table(
@@ -23,6 +33,7 @@ _dim_segmentos_viales = Table(
     Column("id_segmento", Text, primary_key=True),
     Column("nombre_via", Text, nullable=False),
     Column("coordenadas_geometria", JSONB),
+    Column("geom", _Geometry),
 )
 
 # La UniqueConstraint incluye el tiempo para ser compatible con TimescaleDB Hypertable.
@@ -38,7 +49,7 @@ _fact_lecturas_trafico = Table(
 )
 
 # Mapeo posicional para convertir las tuplas que entrega transformer.py
-_COLUMNAS_ESTATICAS = ("id_segmento", "nombre_via", "coordenadas_geometria")
+_COLUMNAS_ESTATICAS = ("id_segmento", "nombre_via", "coordenadas_geometria", "geom")
 _COLUMNAS_DINAMICAS = ("timestamp_lectura", "id_segmento", "velocidad_actual", "tiempo_recorrido", "nivel_congestion")
 
 
@@ -54,28 +65,18 @@ def _normalizar(lista: list, columnas: tuple) -> list[dict]:
     return [dict(zip(columnas, fila)) for fila in lista]
 
 
-def create_tables(engine) -> None:
+def _preparar_estaticos(filas: list[dict]) -> list[dict]:
     """
-    Crea las tablas en la BD si no existen y declara la Hypertable de TimescaleDB.
-    Debe llamarse una única vez al iniciar el contenedor/orquestador,
-    antes de la primera ejecución de load().
+    Convierte el WKT de la clave 'geom' en una expresión ST_GeomFromText(wkt, 4326)
+    para que PostGIS construya la geometría dentro del mismo INSERT masivo.
     """
-    _metadata.create_all(engine)
-    logger.info("Esquema verificado: tablas creadas o ya existentes.")
-
-    # create_hypertable es idempotente gracias a if_not_exists => TRUE
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                "SELECT create_hypertable("
-                "  'fact_lecturas_trafico',"
-                "  'timestamp_lectura',"
-                "  if_not_exists => TRUE"
-                ")"
-            )
-        )
-        conn.commit()
-    logger.info("Hypertable 'fact_lecturas_trafico' confirmada en TimescaleDB.")
+    preparadas = []
+    for fila in filas:
+        fila = dict(fila)
+        wkt = fila.get("geom")
+        fila["geom"] = func.ST_GeomFromText(wkt, 4326) if wkt else None
+        preparadas.append(fila)
+    return preparadas
 
 
 def load(lista_datos_estaticos: list, lista_datos_dinamicos: list, engine) -> bool:
@@ -93,7 +94,7 @@ def load(lista_datos_estaticos: list, lista_datos_dinamicos: list, engine) -> bo
     Returns:
         True si la transacción se confirmó, False si hubo un error en la BD.
     """
-    estaticos = _normalizar(lista_datos_estaticos, _COLUMNAS_ESTATICAS)
+    estaticos = _preparar_estaticos(_normalizar(lista_datos_estaticos, _COLUMNAS_ESTATICAS))
     dinamicos = _normalizar(lista_datos_dinamicos, _COLUMNAS_DINAMICAS)
 
     if not estaticos and not dinamicos:
@@ -103,12 +104,21 @@ def load(lista_datos_estaticos: list, lista_datos_dinamicos: list, engine) -> bo
     with Session(engine) as session:
         try:
             # --- Upsert de calles (dim_segmentos_viales) ---
+            # Fila nueva → se inserta. Fila existente sin geometría → se completa.
+            # Fila existente con geometría → no se toca (idempotente).
             if estaticos:
                 stmt_dim = insert(_dim_segmentos_viales).values(estaticos)
-                stmt_dim = stmt_dim.on_conflict_do_nothing(index_elements=["id_segmento"])
+                stmt_dim = stmt_dim.on_conflict_do_update(
+                    index_elements=["id_segmento"],
+                    set_={
+                        "coordenadas_geometria": stmt_dim.excluded.coordenadas_geometria,
+                        "geom": stmt_dim.excluded.geom,
+                    },
+                    where=_dim_segmentos_viales.c.geom.is_(None),
+                )
                 resultado_dim = session.execute(stmt_dim)
                 logger.info(
-                    "dim_segmentos_viales → %d/%d filas insertadas (el resto ya existía).",
+                    "dim_segmentos_viales → %d/%d filas insertadas o completadas (el resto ya existía).",
                     resultado_dim.rowcount,
                     len(estaticos),
                 )

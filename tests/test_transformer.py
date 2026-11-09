@@ -1,8 +1,38 @@
-import json
-
 import pytest
 
-from transformer import _calcular_nivel_congestion, transform
+from transformer import _calcular_nivel_congestion, coordenadas_a_wkt, transform
+
+
+# ---------------------------------------------------------------------------
+# Pruebas unitarias: coordenadas_a_wkt
+# ---------------------------------------------------------------------------
+class TestCoordenadasAWkt:
+    def test_orden_lon_lat(self):
+        coords = [{"latitude": 22.1, "longitude": -101.0}, {"latitude": 22.2, "longitude": -101.1}]
+        assert coordenadas_a_wkt(coords) == "LINESTRING(-101.0 22.1, -101.1 22.2)"
+
+    def test_un_solo_punto_retorna_none(self):
+        assert coordenadas_a_wkt([{"latitude": 22.1, "longitude": -101.0}]) is None
+
+    def test_lista_vacia_o_none_retorna_none(self):
+        assert coordenadas_a_wkt([]) is None
+        assert coordenadas_a_wkt(None) is None
+
+    def test_puntos_incompletos_se_descartan(self):
+        coords = [
+            {"latitude": 22.1, "longitude": -101.0},
+            {"latitude": 22.15},
+            "basura",
+            {"latitude": 22.2, "longitude": -101.1},
+        ]
+        assert coordenadas_a_wkt(coords) == "LINESTRING(-101.0 22.1, -101.1 22.2)"
+
+    def test_precision_completa(self):
+        coords = [
+            {"latitude": 22.13190841766569, "longitude": -101.03314346657906},
+            {"latitude": 22.13186152118997, "longitude": -101.03304288374099},
+        ]
+        assert "-101.03314346657906 22.13190841766569" in coordenadas_a_wkt(coords)
 
 
 # ---------------------------------------------------------------------------
@@ -120,13 +150,16 @@ class TestTransform:
         assert tiempo is None
         assert congestion is None
 
-    def test_geometria_es_string_json_valido(self, respuesta_valida):
+    def test_paquete_estatico_incluye_coordenadas_y_wkt(self, respuesta_valida):
         estaticos, _ = transform([respuesta_valida])
-        _id, _nombre, geometria = estaticos[0]
-        assert isinstance(geometria, str)
-        coords = json.loads(geometria)
-        assert isinstance(coords, list)
-        assert len(coords) == 2
+        _id, _nombre, coordenadas, wkt = estaticos[0]
+        assert isinstance(coordenadas, list)
+        assert len(coordenadas) == 2
+        assert wkt == "LINESTRING(-100.992 22.135, -100.993 22.136)"
+
+    def test_sin_coordenadas_wkt_es_none(self, respuesta_free_flow_cero):
+        estaticos, _ = transform([respuesta_free_flow_cero])
+        assert estaticos[0][3] is None
 
     def test_lista_mixta_solo_validos_son_procesados(
         self, respuesta_valida, respuesta_json_vacio, respuesta_free_flow_cero

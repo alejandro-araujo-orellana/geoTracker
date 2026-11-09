@@ -1,37 +1,45 @@
 """
 osmnx_loader.py
 ===============
-Script de carga única (o actualización periódica) de la red vial de SLP
-desde OpenStreetMap hacia la tabla dim_calles_osm.
+Carga (o actualiza) la red vial de SLP desde OpenStreetMap en dim_calles_osm
+y la topología de ruteo en dim_calles_osm_vertices_pgr.
 
 Posición en el sistema:
-    OpenStreetMap  →  osmnx_loader.py  →  dim_calles_osm  →  predictor.py
+    OpenStreetMap → osmnx_loader.py → dim_calles_osm (+ vértices) → predictor.py / pgRouting
 
 Cuándo ejecutarlo:
-    - Una vez al arrancar el proyecto por primera vez.
-    - Cuando la mancha urbana cambie significativamente (cada varios meses).
-    - NO en cada ciclo del ETL — la red vial es estática a escala diaria.
+    - Al montar el proyecto por primera vez (después de las migraciones).
+    - Cuando la red vial cambie (cada varios meses). NO en cada ciclo del ETL.
 
-Dependencias:
-    pip install osmnx geopandas shapely sqlalchemy psycopg2-binary
+Requisitos:
+    Migraciones aplicadas hasta la 005 (`python src/migrate.py`).
+    Ejecutar desde la raíz del repo para reutilizar la caché de osmnx en ./cache:
+        python scripts/osmnx_loader.py
 
-Concepto clave — qué es un grafo vial:
-    osmnx descarga la red vial como un grafo G donde:
-      - Nodos  = intersecciones (un punto lat/lon)
-      - Aristas = segmentos de calle entre dos intersecciones (un LineString)
-    Nosotros solo necesitamos las ARISTAS porque son las que tienen
-    geometría lineal, nombre y tipo de vía. Los nodos se descartan.
+Identidad de las aristas (P3/P4 de docs/DATABASE.md):
+    osmnx representa la red como un grafo dirigido. Cada arista se identifica
+    por (u, v, k): nodo OSM inicial, nodo OSM final e índice de arista paralela.
+    Una calle de doble sentido produce dos aristas (u→v y v→u).
+    - (u, v, k) es la clave de upsert → re-ejecutar no duplica la red.
+    - osm_id = blake2b(u_v_k): estable entre ejecuciones (antes era hash() de Python).
+    - source/target = u/v → la topología sale directamente de OSM, sin
+      reconstruirla a mano con pgRouting.
+    - Las filas cargadas con la versión anterior (u NULL) se "adoptan" si su
+      geometría coincide con una arista nueva, conservando su osm_id para no
+      romper el histórico de trafico_calles.
+    - Las aristas que ya no existen en OSM se marcan activo = FALSE (no se
+      borran, porque trafico_calles las referencia).
 """
 
 import logging
-from sqlalchemy import create_engine, text
+
 import geopandas as gpd
 import osmnx as ox
-import config
+from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert, text
 
-# ---------------------------------------------------------------------------
-# Configuración de logging
-# ---------------------------------------------------------------------------
+import config
+from osm_utils import id_determinista, normalizar_nombre, normalizar_oneway, normalizar_tipo, parsear_maxspeed
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -42,36 +50,13 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Parámetros
 # ---------------------------------------------------------------------------
-
 DB_URL = config.DB_URL
 
-# Lugar de búsqueda. osmnx acepta nombres de lugar en lenguaje natural —
-# internamente los resuelve contra Nominatim (el geocodificador de OSM).
-# "San Luis Potosí, Mexico" descarga la zona metropolitana completa.
-#LUGAR = "San Luis Potosí, Mexico"
-
-# Lugar de búsqueda. IMPORTANTE: "San Luis Potosí, Mexico" es ambiguo —
-# Nominatim puede resolverlo contra el ESTADO (que es 36x más grande que
-# el municipio) en lugar de la ciudad. Para evitar esa ambigüedad usamos
-# un bounding box explícito, el mismo que usa predictor.py para la grilla
-# IDW. Esto además garantiza que ambos sistemas cubran exactamente la
-# misma zona geográfica.
+# Bounding box explícito: "San Luis Potosí, Mexico" es ambiguo en Nominatim
+# (puede resolver al estado completo). Ver P9 en docs/DATABASE.md.
 BBOX = (-101.03, 22.11, -100.96, 22.19)  # (lon_min, lat_min, lon_max, lat_max)
 
-# Tipos de vía a incluir. OSM clasifica las calles en jerarquías:
-#   motorway/trunk   → autopistas y vías rápidas
-#   primary          → avenidas principales (las que ya mides con TomTom)
-#   secondary        → avenidas secundarias importantes
-#   tertiary         → calles conectoras entre colonias
-#   residential      → calles internas de colonias
-#   unclassified     → calles sin clasificar pero transitables
-#
-# Excluimos: footway, cycleway, path, steps (peatonal/ciclista),
-#            service (estacionamientos, accesos privados),
-#            track (caminos de terracería)
-#
-# Para SLP, residential + tertiary + secondary cubre bien la zona urbana
-# sin saturar de calles de acceso privado o caminos rurales.
+# Tipos de vía incluidos. Se excluyen peatonales, ciclovías, service y track.
 TIPOS_VIA = {
     "motorway", "trunk", "primary", "secondary",
     "tertiary", "residential", "unclassified",
@@ -79,258 +64,274 @@ TIPOS_VIA = {
     "secondary_link", "tertiary_link",
 }
 
-# SRID métrico para SLP — el mismo que usa predictor.py
 SRID_METRICO = 32614
+MIGRACION_REQUERIDA = "005"
+
+# Tablas temporales de staging (se crean con SQL en la transacción de carga)
+_meta_staging = MetaData()
+_stg_aristas = Table(
+    "stg_aristas", _meta_staging,
+    Column("osm_id", BigInteger), Column("u", BigInteger), Column("v", BigInteger),
+    Column("k", Integer), Column("nombre", Text), Column("tipo_via", Text),
+    Column("longitud_m", Float), Column("maxspeed_kmh", Float), Column("oneway", Boolean),
+    Column("geom_wkt", Text), Column("centro_wkt", Text),
+)
+_stg_nodos = Table(
+    "stg_nodos", _meta_staging,
+    Column("id", BigInteger), Column("x", Float), Column("y", Float),
+)
 
 
 # ---------------------------------------------------------------------------
 # Etapa 1 — Descargar la red vial desde OpenStreetMap
 # ---------------------------------------------------------------------------
-
-def descargar_red_vial(bbox: tuple, tipos: set) -> gpd.GeoDataFrame:
+def descargar_red_vial(bbox: tuple) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
-    Descarga la red vial del lugar especificado usando osmnx.
-
-    osmnx.graph_from_place() hace internamente tres cosas:
-      1. Geocodifica el nombre del lugar contra Nominatim → obtiene el
-         polígono administrativo de SLP.
-      2. Construye una query Overpass para pedir todas las vías dentro
-         de ese polígono (similar a lo que hace tu ETL actual, pero
-         automático y sin definir coordenadas manualmente).
-      3. Retorna un grafo NetworkX con nodos y aristas.
-
-    Luego graph_to_gdfs() convierte ese grafo en dos GeoDataFrames:
-      - nodes_gdf: intersecciones (no lo necesitamos)
-      - edges_gdf: segmentos de calle (esto es lo que queremos)
-
-    Cada fila de edges_gdf es un segmento con columnas como:
-      name, highway, length, geometry (LineString en WGS84)
+    Descarga el grafo vial dirigido (network_type="drive") y lo devuelve como
+    (nodos, aristas). Las aristas conservan u, v, key como columnas.
     """
-    log.info(f"Descargando red vial del bbox '{bbox}' desde OpenStreetMap...")
-    log.info("  (esto puede tardar 1-3 minutos dependiendo del tamaño de la ciudad)")
-
-    lon_min, lat_min, lon_max, lat_max = bbox
-
-    # network_type="drive" filtra solo vías para vehículos motorizados.
-    # Esto ya excluye peatonal/ciclista automáticamente antes de nuestro
-    # filtro por tipo_via.
+    log.info(f"Etapa 1: descargando red vial del bbox {bbox} desde OpenStreetMap...")
     grafo = ox.graph_from_bbox(
-        #lugar,
-        bbox=(lon_min,lat_min,lon_max,lat_max),
+        bbox=bbox,
         network_type="drive",
-        retain_all=False,     # solo el componente conectado principal
-        simplify=True,        # simplifica la geometría (elimina nodos intermedios
-                              # que no son intersecciones reales — reduce ruido)
+        retain_all=False,  # solo el componente conectado principal
+        simplify=True,     # quita nodos intermedios que no son intersecciones
     )
-
-    # Convertir a GeoDataFrame. Solo necesitamos las aristas (edges).
-    _, edges_gdf = ox.graph_to_gdfs(grafo)
-
-    log.info(f"  → {len(edges_gdf):,} segmentos descargados antes de filtrar")
-    return edges_gdf
+    nodos, aristas = ox.graph_to_gdfs(grafo)
+    log.info(f"  → {len(nodos):,} nodos y {len(aristas):,} aristas descargadas")
+    return nodos, aristas.reset_index()
 
 
 # ---------------------------------------------------------------------------
 # Etapa 2 — Limpiar y filtrar
 # ---------------------------------------------------------------------------
-
-def limpiar_red(edges_gdf: gpd.GeoDataFrame, tipos: set) -> gpd.GeoDataFrame:
-    """
-    Filtra, renombra y prepara el GeoDataFrame para inserción en la DB.
-
-    Columnas que vienen de osmnx que nos interesan:
-      - osmid (índice): ID único de OSM para cada arista
-      - name: nombre de la calle (puede ser lista si la arista tiene varios nombres)
-      - highway: tipo de vía ("residential", "primary", etc.)
-      - length: longitud en metros (ya la calcula osmnx)
-      - geometry: LineString en WGS84
-
-    Columnas que creamos nosotros:
-      - centroide_m: punto central del segmento en UTM 14N (para el IDW)
-    """
+def limpiar_red(nodos: gpd.GeoDataFrame, aristas: gpd.GeoDataFrame, tipos: set) -> tuple[list[dict], list[dict]]:
+    """Filtra por tipo de vía y prepara los registros de aristas y nodos para staging."""
     log.info("Etapa 2: limpiando y filtrando la red vial...")
 
-    # Resetear índice para que osmid sea una columna normal, no el índice
-    gdf = edges_gdf.reset_index()
-
-    # osmnx usa un índice compuesto (u, v, key) para identificar aristas.
-    # u y v son los nodos de inicio y fin. Para nosotros el identificador
-    # relevante es osmid (el ID de OpenStreetMap de la vía subyacente).
-    # Como una misma vía OSM puede tener múltiples aristas en el grafo,
-    # generamos un ID único combinando u, v y key.
-    gdf["osm_id"] = (
-        gdf["u"].astype(str) + "_" +
-        gdf["v"].astype(str) + "_" +
-        gdf["key"].astype(str)
-    ).apply(hash).abs()
-
-    # Normalizar el nombre: puede ser string, lista de strings, o NaN.
-    # Si es lista (arista con varios nombres), tomamos el primero.
-    def normalizar_nombre(valor):
-        if isinstance(valor, list):
-            return valor[0]
-        if isinstance(valor, str):
-            return valor
-        return None  # NaN → NULL en la DB
-
-    gdf["nombre"] = gdf["name"].apply(normalizar_nombre)
-
-    # Normalizar tipo_via: también puede ser lista (MultiPolygon de tipos)
-    def normalizar_tipo(valor):
-        if isinstance(valor, list):
-            return valor[0]
-        return str(valor)
-
+    gdf = aristas.copy()
     gdf["tipo_via"] = gdf["highway"].apply(normalizar_tipo)
-
-    # Filtrar por tipos de vía relevantes
     antes = len(gdf)
     gdf = gdf[gdf["tipo_via"].isin(tipos)].copy()
-    log.info(f"  → {antes:,} → {len(gdf):,} segmentos tras filtrar por tipo de vía")
+    log.info(f"  → {antes:,} → {len(gdf):,} aristas tras filtrar por tipo de vía")
 
-    # Calcular centroide en UTM 14N (EPSG:32614).
-    # Lo precalculamos aquí para no hacerlo en cada ciclo del predictor.
-    # to_crs() reproyecta toda la columna geometry a metros.
-    gdf_metrico = gdf.to_crs(epsg=SRID_METRICO)
-    gdf["centroide_m"] = gdf_metrico.geometry.centroid
+    gdf["centroide_m"] = gdf.to_crs(epsg=SRID_METRICO).geometry.centroid
 
-    # Seleccionar solo las columnas que necesita la DB
-    gdf_final = gdf[[
-        "osm_id", "nombre", "tipo_via", "length", "geometry", "centroide_m"
-    ]].rename(columns={"length": "longitud_m"})
+    columna = lambda nombre: gdf[nombre] if nombre in gdf.columns else [None] * len(gdf)  # noqa: E731
 
-    # Eliminar duplicados por osm_id (pueden aparecer si el grafo tiene
-    # aristas paralelas entre los mismos nodos)
-    gdf_final = gdf_final.drop_duplicates(subset="osm_id")
-
-    log.info(f"  → {len(gdf_final):,} segmentos únicos listos para insertar")
-    return gdf_final
-
-
-# ---------------------------------------------------------------------------
-# Etapa 3 — Insertar en dim_calles_osm
-# ---------------------------------------------------------------------------
-
-def insertar_en_db(gdf: gpd.GeoDataFrame, engine) -> None:
-    """
-    Inserta la red vial limpia en dim_calles_osm.
-
-    Estrategia: TRUNCATE + INSERT.
-    Como dim_calles_osm es estática, lo más simple es vaciarla y repoblarla.
-    Esto garantiza consistencia si el script se corre como actualización.
-
-    Por qué no usamos gdf.to_postgis() directamente:
-    Necesitamos insertar DOS geometrías por fila (geom y centroide_m) en
-    diferentes columnas con diferentes SRIDs. gdf.to_postgis() solo maneja
-    una columna de geometría. Usamos psycopg2 via SQLAlchemy con WKT.
-    """
-    log.info("Etapa 3: insertando en dim_calles_osm...")
-
-    # Convertir geometrías a WKT (Well-Known Text) para el INSERT
-    # ST_GeomFromText(wkt, srid) las convierte de vuelta a geometría PostGIS
-    from shapely import wkt as shapely_wkt
-
-    registros = []
-    for _, fila in gdf.iterrows():
-        registros.append({
-            "osm_id":      int(fila["osm_id"]),
-            "nombre":      fila["nombre"],
-            "tipo_via":    fila["tipo_via"],
-            "longitud_m":  float(fila["longitud_m"]) if fila["longitud_m"] else None,
-            "geom_wkt":    fila["geometry"].wkt,
-            "centro_wkt":  fila["centroide_m"].wkt,
+    aristas_reg = []
+    vistos = set()
+    for u, v, k, nombre, tipo, longitud, maxspeed, oneway, geom, centro in zip(
+        gdf["u"], gdf["v"], gdf["key"], columna("name"), gdf["tipo_via"], gdf["length"],
+        columna("maxspeed"), columna("oneway"), gdf.geometry, gdf["centroide_m"],
+    ):
+        clave = (int(u), int(v), int(k))
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        aristas_reg.append({
+            "osm_id": id_determinista(*clave),
+            "u": clave[0], "v": clave[1], "k": clave[2],
+            "nombre": normalizar_nombre(nombre),
+            "tipo_via": tipo,
+            "longitud_m": float(longitud) if longitud is not None else None,
+            "maxspeed_kmh": parsear_maxspeed(maxspeed),
+            "oneway": normalizar_oneway(oneway),
+            "geom_wkt": geom.wkt,
+            "centro_wkt": centro.wkt,
         })
 
-    insert_sql = text("""
-        INSERT INTO dim_calles_osm
-            (osm_id, nombre, tipo_via, longitud_m, geom, centroide_m)
-        VALUES (
-            :osm_id,
-            :nombre,
-            :tipo_via,
-            :longitud_m,
-            ST_GeomFromText(:geom_wkt,   4326),
-            ST_GeomFromText(:centro_wkt, 32614)
-        )
-        ON CONFLICT (osm_id) DO UPDATE SET
-            nombre     = EXCLUDED.nombre,
-            tipo_via   = EXCLUDED.tipo_via,
-            longitud_m = EXCLUDED.longitud_m,
-            geom       = EXCLUDED.geom,
-            centroide_m = EXCLUDED.centroide_m
-    """)
+    usados = {a["u"] for a in aristas_reg} | {a["v"] for a in aristas_reg}
+    nodos_reg = [
+        {"id": int(osmid), "x": float(x), "y": float(y)}
+        for osmid, x, y in zip(nodos.index, nodos["x"], nodos["y"])
+        if int(osmid) in usados
+    ]
 
-    # Insertar en lotes de 500 para no saturar la memoria de la transacción
-    LOTE = 500
-    total = len(registros)
-    insertados = 0
+    log.info(f"  → {len(aristas_reg):,} aristas únicas y {len(nodos_reg):,} nodos listos")
+    return aristas_reg, nodos_reg
+
+
+# ---------------------------------------------------------------------------
+# Etapa 3 — Sincronizar con la base de datos
+# ---------------------------------------------------------------------------
+def _verificar_migraciones(conn) -> None:
+    existe = conn.execute(text("SELECT to_regclass('schema_migrations') IS NOT NULL")).scalar()
+    version = conn.execute(text("SELECT max(version) FROM schema_migrations")).scalar() if existe else None
+    if version is None or version < MIGRACION_REQUERIDA:
+        raise RuntimeError(
+            f"La BD está en la migración {version!r}; se requiere >= {MIGRACION_REQUERIDA}. "
+            "Ejecuta primero: python src/migrate.py"
+        )
+
+
+def sincronizar_db(aristas: list[dict], nodos: list[dict], engine) -> None:
+    """
+    Una sola transacción: staging → adopción de filas antiguas → upsert de aristas
+    → desactivación de aristas que ya no existen → upsert/limpieza de vértices.
+    Si algo falla, no se modifica nada.
+    """
+    log.info("Etapa 3: sincronizando dim_calles_osm y vértices...")
 
     with engine.begin() as conn:
-        for i in range(0, total, LOTE):
-            lote = registros[i:i + LOTE]
-            conn.execute(insert_sql, lote)
-            insertados += len(lote)
-            log.info(f"  → {insertados:,}/{total:,} segmentos insertados...")
+        _verificar_migraciones(conn)
 
-    log.info(f"  → Carga completa: {total:,} segmentos en dim_calles_osm")
+        # 3.1 Staging
+        conn.execute(text("""
+            CREATE TEMP TABLE stg_aristas (
+                osm_id bigint, u bigint, v bigint, k integer, nombre text, tipo_via text,
+                longitud_m double precision, maxspeed_kmh double precision, oneway boolean,
+                geom_wkt text, centro_wkt text
+            ) ON COMMIT DROP;
+            CREATE TEMP TABLE stg_nodos (id bigint, x double precision, y double precision) ON COMMIT DROP;
+        """))
+        conn.execute(insert(_stg_aristas), aristas)
+        conn.execute(insert(_stg_nodos), nodos)
+        conn.execute(text("""
+            ALTER TABLE stg_aristas
+                ADD COLUMN geom geometry(LineString, 4326),
+                ADD COLUMN centroide geometry(Point, 32614);
+            UPDATE stg_aristas
+               SET geom = ST_GeomFromText(geom_wkt, 4326),
+                   centroide = ST_GeomFromText(centro_wkt, 32614);
+            CREATE INDEX ON stg_aristas USING gist (geom);
+            CREATE INDEX ON stg_aristas (u, v, k);
+            ANALYZE stg_aristas;
+        """))
+
+        # 3.2 Adopción de filas de la versión anterior (u NULL): misma geometría,
+        # mismo sentido → se les asigna (u, v, k) y conservan su osm_id.
+        # Cada pasada empareja 1:1; se repite porque las aristas paralelas
+        # (mismos nodos, k = 0, 1, ...) tienen geometrías idénticas y forman
+        # grupos de varios candidatos que se resuelven de a una pareja por pasada.
+        adoptadas = 0
+        while True:
+            en_pasada = _adoptar_una_pasada(conn)
+            adoptadas += en_pasada
+            if en_pasada == 0:
+                break
+        log.info(f"  → {adoptadas:,} aristas existentes adoptadas (conservan su osm_id)")
+        _upsert_y_limpieza(conn, len(nodos))
+
+
+def _adoptar_una_pasada(conn) -> int:
+    return conn.execute(text("""
+            WITH candidatos AS (
+                SELECT c.osm_id, s.u, s.v, s.k,
+                       row_number() OVER (PARTITION BY c.osm_id ORDER BY s.u, s.v, s.k) AS rc,
+                       row_number() OVER (PARTITION BY s.u, s.v, s.k ORDER BY c.osm_id) AS rs
+                FROM dim_calles_osm c
+                JOIN stg_aristas s
+                  ON c.geom && s.geom
+                 AND c.tipo_via = s.tipo_via
+                 AND ST_NPoints(c.geom) = ST_NPoints(s.geom)
+                 AND ST_DWithin(ST_StartPoint(c.geom), ST_StartPoint(s.geom), 1e-6)
+                 AND ST_DWithin(ST_EndPoint(c.geom),   ST_EndPoint(s.geom),   1e-6)
+                WHERE c.u IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM dim_calles_osm x
+                                  WHERE x.u = s.u AND x.v = s.v AND x.k = s.k)
+            )
+            UPDATE dim_calles_osm c
+               SET u = m.u, v = m.v, k = m.k
+              FROM candidatos m
+             WHERE c.osm_id = m.osm_id AND m.rc = 1 AND m.rs = 1
+        """)).rowcount
+
+
+def _upsert_y_limpieza(conn, n_nodos: int) -> None:
+    # 3.3 Upsert por clave natural (u, v, k)
+    resultado = conn.execute(text("""
+        INSERT INTO dim_calles_osm AS c
+            (osm_id, u, v, k, source, target, nombre, tipo_via, longitud_m,
+             maxspeed_kmh, oneway, geom, centroide_m, activo)
+        SELECT osm_id, u, v, k, u, v, nombre, tipo_via, longitud_m,
+               maxspeed_kmh, oneway, geom, centroide, TRUE
+        FROM stg_aristas
+        ON CONFLICT (u, v, k) DO UPDATE SET
+            source       = EXCLUDED.source,
+            target       = EXCLUDED.target,
+            nombre       = EXCLUDED.nombre,
+            tipo_via     = EXCLUDED.tipo_via,
+            longitud_m   = EXCLUDED.longitud_m,
+            maxspeed_kmh = EXCLUDED.maxspeed_kmh,
+            oneway       = EXCLUDED.oneway,
+            geom         = EXCLUDED.geom,
+            centroide_m  = EXCLUDED.centroide_m,
+            activo       = TRUE
+        RETURNING (xmax = 0) AS insertada
+    """)).fetchall()
+    insertadas = sum(1 for fila in resultado if fila.insertada)
+    log.info(f"  → {insertadas:,} aristas nuevas, {len(resultado) - insertadas:,} actualizadas")
+
+    # 3.4 Aristas que ya no están en OSM (o que no se pudieron adoptar)
+    desactivadas = conn.execute(text("""
+        UPDATE dim_calles_osm c
+           SET activo = FALSE, source = NULL, target = NULL
+         WHERE c.activo
+           AND NOT EXISTS (SELECT 1 FROM stg_aristas s
+                           WHERE s.u = c.u AND s.v = c.v AND s.k = c.k)
+    """)).rowcount
+    log.info(f"  → {desactivadas:,} aristas marcadas como inactivas")
+
+    # 3.5 Vértices = nodos OSM usados por aristas activas
+    conn.execute(text("""
+        INSERT INTO dim_calles_osm_vertices_pgr (id, x, y, geom)
+        SELECT id, x, y, ST_SetSRID(ST_MakePoint(x, y), 4326) FROM stg_nodos
+        ON CONFLICT (id) DO UPDATE SET x = EXCLUDED.x, y = EXCLUDED.y, geom = EXCLUDED.geom
+    """))
+    borrados = conn.execute(text("""
+        DELETE FROM dim_calles_osm_vertices_pgr p
+         WHERE NOT EXISTS (SELECT 1 FROM dim_calles_osm c WHERE c.activo AND c.source = p.id)
+           AND NOT EXISTS (SELECT 1 FROM dim_calles_osm c WHERE c.activo AND c.target = p.id)
+    """)).rowcount
+    log.info(f"  → {n_nodos:,} vértices sincronizados, {borrados:,} vértices obsoletos eliminados")
 
 
 # ---------------------------------------------------------------------------
-# Etapa 4 — Resumen estadístico
+# Etapa 4 — Validación y resumen
 # ---------------------------------------------------------------------------
-
-def mostrar_resumen(engine) -> None:
-    """
-    Muestra un resumen de lo que quedó en la tabla, útil para decidir
-    qué tipos de vía incluir en las consultas de Grafana y el predictor.
-    """
-    log.info("Etapa 4: resumen de la red vial cargada...")
-
-    sql = text("""
-        SELECT
-            tipo_via,
-            COUNT(*)                        AS segmentos,
-            ROUND(SUM(longitud_m)::numeric / 1000, 1) AS km_totales,
-            COUNT(*) FILTER (WHERE nombre IS NOT NULL) AS con_nombre
-        FROM dim_calles_osm
-        GROUP BY tipo_via
-        ORDER BY segmentos DESC
-    """)
-
+def validar_y_resumir(engine) -> None:
+    log.info("Etapa 4: validando topología...")
     with engine.connect() as conn:
-        resultado = conn.execute(sql).fetchall()
+        huerfanas = conn.execute(text("""
+            SELECT count(*) FROM dim_calles_osm c
+            WHERE c.activo AND (
+                NOT EXISTS (SELECT 1 FROM dim_calles_osm_vertices_pgr p WHERE p.id = c.source) OR
+                NOT EXISTS (SELECT 1 FROM dim_calles_osm_vertices_pgr p WHERE p.id = c.target))
+        """)).scalar()
+        componentes = conn.execute(text("""
+            SELECT count(DISTINCT component) FROM pgr_connectedComponents(
+                'SELECT id, source, target, longitud_m AS cost, -1::float8 AS reverse_cost
+                 FROM dim_calles_osm WHERE activo')
+        """)).scalar()
+        resumen = conn.execute(text("""
+            SELECT tipo_via, count(*), round(sum(longitud_m)::numeric / 1000, 1),
+                   count(nombre), count(maxspeed_kmh)
+            FROM dim_calles_osm WHERE activo
+            GROUP BY tipo_via ORDER BY 2 DESC
+        """)).fetchall()
 
-    log.info("  Tipo de vía        | Segmentos | Km totales | Con nombre")
-    log.info("  ─────────────────────────────────────────────────────────")
-    for fila in resultado:
-        log.info(
-            f"  {fila[0]:<18} | {fila[1]:>9,} | {fila[2]:>10} | {fila[3]:>10,}"
-        )
+    nivel = log.info if huerfanas == 0 else log.error
+    nivel(f"  → Aristas activas sin vértice: {huerfanas}")
+    log.info(f"  → Componentes conexos (no dirigidos) del grafo activo: {componentes}")
+    log.info("  Tipo de vía        | Aristas | Km     | Con nombre | Con maxspeed")
+    for tipo, n, km, con_nombre, con_vel in resumen:
+        log.info(f"  {tipo:<18} | {n:>7,} | {km:>6} | {con_nombre:>10,} | {con_vel:>12,}")
 
 
 # ---------------------------------------------------------------------------
 # Orquestador principal
 # ---------------------------------------------------------------------------
-
 def ejecutar():
     log.info("=== osmnx_loader.py iniciando ===")
-
     engine = create_engine(DB_URL, pool_pre_ping=True)
 
-    # Etapa 1: descargar de OSM
-    edges_gdf = descargar_red_vial(BBOX, TIPOS_VIA)
-
-    # Etapa 2: limpiar y preparar
-    gdf_limpio = limpiar_red(edges_gdf, TIPOS_VIA)
-
-    # Etapa 3: insertar en DB
-    insertar_en_db(gdf_limpio, engine)
-
-    # Etapa 4: resumen
-    mostrar_resumen(engine)
+    nodos, aristas = descargar_red_vial(BBOX)
+    aristas_reg, nodos_reg = limpiar_red(nodos, aristas, TIPOS_VIA)
+    sincronizar_db(aristas_reg, nodos_reg, engine)
+    validar_y_resumir(engine)
 
     log.info("=== osmnx_loader.py finalizado ===")
-    log.info("Siguiente paso: modificar predictor.py para usar dim_calles_osm")
 
 
 if __name__ == "__main__":

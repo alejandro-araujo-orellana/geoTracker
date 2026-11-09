@@ -8,6 +8,7 @@ import config
 import extractor
 import transformer
 import loader
+import migrate
 import predictor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -46,9 +47,9 @@ def ciclo_etl(engine):
 if __name__ == "__main__":
     logger.info("Iniciando Orquestador Daemon de Tráfico...")
     
-    # Preparamos el motor de BD y garantizamos que las tablas existan
+    # Preparamos el motor de BD y llevamos el esquema a la última migración
     engine_postgres = create_engine(config.DB_URL)
-    loader.create_tables(engine_postgres)
+    migrate.aplicar_migraciones(engine_postgres)
     
     INTERVALO_SEGUNDOS = 15 * 60  # 15 minutos
     

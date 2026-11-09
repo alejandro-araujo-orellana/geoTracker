@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el resto de tu código (extractor, transformer, loader, main)
 COPY src/ ./src/
 COPY data/ ./data/
+COPY db/migrations/ ./db/migrations/
 
 # El comando por defecto al iniciar el contenedor (cuando main.py esté listo)
 CMD ["python", "src/main.py"]

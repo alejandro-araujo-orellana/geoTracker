@@ -237,6 +237,7 @@ def leer_centroides_osm(engine) -> gpd.GeoDataFrame:
             centroide_m
         FROM dim_calles_osm
         WHERE centroide_m IS NOT NULL
+          AND activo
     """
     with engine.connect() as conn:
         conexion_nativa = conn.connection
