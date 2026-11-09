@@ -53,7 +53,8 @@ python scripts/osmnx_loader.py
 `osmnx_loader.py` es idempotente: se puede re-ejecutar sin duplicar la red ni romper el histórico.
 
 Después de regenerar los puntos (paso 1) y de medirlos al menos una vez, quita los que devuelven el mismo
-segmento TomTom: `python scripts/deduplicar_puntos.py`.
+segmento TomTom: `python scripts/deduplicar_puntos.py`. `scripts/prueba_vector_tiles.py` es una prueba
+de la fuente alternativa (vector tiles); requiere `pip install mapbox-vector-tile==2.1.0`.
 
 Variable opcional `TOMTOM_CUOTA_MENSUAL` (default 20000) si cambia el plan de TomTom.
 
@@ -121,7 +122,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. Cuota TomTom: 20 000 peticiones/MES de Flow Segment Data. El ETL ya respeta un pool (`presupuesto.py`, 207 puntos deduplicados); listo para volver a encenderse.
+1. Cuota TomTom: 20 000 peticiones/MES de Flow Segment Data. El ETL ya respeta un pool (`presupuesto.py`, 207 puntos deduplicados); listo para volver a encenderse. Evaluar migrar a vector tiles (200 000/mes, ver `docs/ROUTING.md` › Fuentes de tráfico).
 2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

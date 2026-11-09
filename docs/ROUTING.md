@@ -153,6 +153,22 @@ Limitación: con ~800 peticiones/día cada punto se renueva cada ~3 h en pico y 
 predictor solo usa lecturas de las últimas 6 h, así que la cobertura en vivo es escasa (en el primer
 ciclo, 75 % de las calles quedó fuera del alcance de una fuente).
 
+**A — Prueba de vector tiles** (`scripts/prueba_vector_tiles.py`, 2026-11-09, zoom 14):
+
+| Métrica | Resultado |
+|---|---|
+| Tiles por pasada sobre la zona | 49 (zoom 13: 16; zoom 15: 182) |
+| Consumo cada 15 min todo el día | ~4 700/día ≈ 141 000/mes (< 200 000) |
+| Tramos de tráfico por pasada | 5 267, con `traffic_level` = velocidad actual / libre (0–1) y `road_closure` |
+| Aristas OSM cubiertas | 14 698 (22 %; 24 % de los km) |
+| Cobertura motorway / trunk / primary | 98–99 % |
+| Cobertura secondary / tertiary | 95 % / 80 % |
+| Cobertura residential | 8 % (sigue necesitando IDW) |
+| Coincidencia con Flow Segment Data (16 segmentos, ~10 min de diferencia) | diferencia media 0.052, máx 0.211; detectó la congestión de Av. Constitución (0.30 vs 0.32) |
+
+Pendiente de la prueba: asociación por sentido de circulación (hoy se asocia el tramo más cercano sin
+importar el sentido) y verificar que los términos de TomTom permiten almacenar datos derivados de tiles.
+
 ## Limitaciones conocidas
 - La congestión de calles residenciales es **inferida** por IDW desde las avenidas medidas, no medida.
 - El IDW recorta la congestión a [1, 3]; congestiones extremas (observadas hasta 8) quedan subestimadas.
