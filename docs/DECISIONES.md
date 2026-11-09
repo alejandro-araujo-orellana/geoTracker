@@ -112,8 +112,18 @@ desde Grafana, psql o la API sin duplicar lógica, y probable contra PostgreSQL 
 - `LEFT JOIN` a velocidades con 20 km/h por defecto: con `JOIN` una arista de tipo no listado desaparecía
   del grafo en silencio y podía dejar zonas inalcanzables.
 - `maxspeed` de OSM solo entre 10 y 130 km/h (los datos de OSM traen valores absurdos ocasionales).
-**Verificado:** 7 tests de integración con grafo sintético; ruta real Centro → UASLP 5.16 km / 9.6 min en
-0.59 s sobre 67 312 aristas.
+**Verificado:** 7 tests de integración con grafo sintético; ruta real Centro → UASLP en 0.59 s sobre
+~67 300 aristas. Con el tráfico de las 21:21 UTC: 5.03 km / 10.4 min (a flujo libre la misma ruta: 7.6 min).
+**Corrección:** el commit `e2b4461` reportó "5.16 km / 9.6 min a flujo libre". Era incorrecto: en ese
+momento ya había un ciclo de tráfico de hace 12 min (< 30 min), así que la vista usó tráfico real.
+
+## D15 — ETL encendido solo con `--no-deps` (2026-11-09)
+**Decisión:** el ETL se levanta con `docker compose up -d --build --no-deps etl_worker`.
+**Por qué:** `trafico_db` y `grafana_bi` se crearon con Compose 1.29 (imagen `geotracker_timescaledb`); Compose
+v5 nombra la imagen `geotracker-timescaledb` y, sin `--no-deps`, **recrearía el contenedor de la BD**. El volumen
+de datos persistiría, pero no hay razón para arriesgarlo. Pendiente: migrar los contenedores a Compose v5 en
+una ventana controlada (respaldo previo) y declarar `restart: unless-stopped` en el ETL, para que un reinicio
+de Docker no detenga la acumulación de datos.
 
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con

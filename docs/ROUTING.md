@@ -2,7 +2,8 @@
 
 > Estado (2026-11-09): **ruteo con tráfico implementado en la BD** (migración 011, D14):
 > `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)`. Prueba real Centro Histórico → Zona
-> Universitaria UASLP: 81 aristas, 5.16 km, 9.6 min a flujo libre, 0.59 s de cálculo.
+> Universitaria UASLP con el tráfico de las 21:21 UTC (15:21 local): 79 aristas, 5.03 km, **10.4 min**;
+> la misma ruta a flujo libre serían 7.6 min (~2.8 min perdidos por congestión); 0.59 s de cálculo.
 > Falta: exponerlo en la API (`services/api`) y validar ETAs.
 
 ## Objetivo

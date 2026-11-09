@@ -20,12 +20,16 @@ Documentación:
 
 ### Docker
 ```bash
-docker compose up --build              # BD + ETL + Grafana
+docker compose up -d --build --no-deps etl_worker   # (re)levantar SOLO el ETL — ver abajo
 docker compose up -d timescaledb       # solo la BD (desarrollo / tests)
 docker logs -f etl_trafico             # logs del ETL
 docker exec -it trafico_db psql -U user -d vialidades_slp   # consola SQL
 ```
 Grafana: http://localhost:3000
+
+⚠️ `trafico_db` y `grafana_bi` fueron creados con Compose 1.29; Compose v5 espera otro nombre de imagen y
+**recrearía la BD** con `docker compose up` sin `--no-deps` (D15). Hasta migrarlos, levanta servicios uno a
+uno con `--no-deps`.
 
 ### Tests
 Los tests importan módulos por nombre simple; `PYTHONPATH` debe apuntar a `src/`:
@@ -130,8 +134,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. Reestructuración a vector tiles (D8–D13) completa: ingesta (`fact_flujo_aristas`) y predictor v3. ETL listo para encenderse (ciclo ~11 s). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
-2. Saneamiento de esquema: P1–P9 y P11 resueltos (2026-11-09). Pendiente: P10 (`trafico_inferido` legado).
-3. Ruteo: `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` ya funciona en la BD (D14). Falta exponerlo en `services/api`.
-3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
-4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).
+1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
+2. Ruteo: `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` funciona en la BD (D14). Falta exponerlo en `services/api` (hoy `app/api` y `app/core` están vacíos) y validar ETAs.
+3. Infra: migrar contenedores a Compose v5 con respaldo previo y `restart: unless-stopped` en el ETL (D15); credenciales del compose a `.env` (el compose define `DB_PASS`, `config.py` lee `DB_PASSWORD`).
+4. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).
