@@ -11,8 +11,11 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 ## 0. Visión del sistema
 
-1. **Medir** el tráfico en ~475 puntos de avenidas principales (TomTom Flow API).
-2. **Inferir** la congestión en toda la red vial OSM (~24.5 k aristas) por IDW → mapa de calor en Grafana.
+1. **Medir** el tráfico en 440 puntos de avenidas principales (TomTom Flow API).
+2. **Inferir** la congestión en toda la red vial OSM (~67.5 k aristas) por IDW → mapa de calor en Grafana.
+
+Ambos cubren la misma zona de estudio (`src/zona.py`): zona metropolitana de SLP incluida Soledad de
+Graciano Sánchez.
 3. **Rutear** (próxima fase): ruta más rápida real entre el usuario y un destino usando Dijkstra
    (pgRouting) con costos ponderados por la congestión actual.
 
@@ -30,7 +33,7 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 * **Motor de base de datos:** PostgreSQL 15 con **TimescaleDB + PostGIS + pgRouting**. No se cambia de imagen sin actualizar `DATABASE.md`. ✅
 * **Esquema versionado:** todo DDL (tablas, columnas, índices, hypertables, vistas) vive en `db/migrations/NNN_nombre.sql`, es idempotente y se aplica con `src/migrate.py` (automático al arrancar `main.py`). Una migración aplicada nunca se edita: se agrega otra. Nunca se modifica el esquema solo a mano. ✅
-* **Hypertables:** toda tabla de histórico (`fact_lecturas_trafico`, `trafico_calles`) se convierte en hypertable antes de recibir datos y debe tener política de compresión/retención. ⚠️ P8
+* **Hypertables:** toda tabla de histórico (`fact_lecturas_trafico`, `trafico_calles`) se convierte en hypertable antes de recibir datos y debe tener política de compresión/retención. Los datos crudos (`fact_lecturas_trafico`) nunca expiran; los derivados sí. Ningún proceso escribe en chunks de más de 7 días (pueden estar comprimidos). ✅
 * **Variables de entorno:** ninguna credencial (BD, Grafana, TomTom) en código ni en `docker-compose.yml`; todo viene de `.env` (en `.gitignore`) vía `${VAR}`. Nombres canónicos: `TOMTOM_API_KEY`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GF_ADMIN_USER`, `GF_ADMIN_PASSWORD`. ⚠️ el compose tiene contraseñas literales y usa `DB_PASS`.
 * **Dockerfile del ETL:** una sola etapa basada en `python:3.11-slim` + dependencias de GDAL/libpq. ⚠️ hoy tiene un segundo `FROM timescaledb-ha` copiado de `db/Dockerfile`.
 
@@ -40,14 +43,14 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 * **E/S de red asíncrona en el ETL:** `aiohttp` + `asyncio`. `requests` solo se permite en scripts de preparación one-shot (`scripts/`). ✅
 * **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ⚠️ geopandas, shapely, pyproj, scipy, numpy, pandas, osmnx, requests sin fijar; la API usa `>=`.
 * **Logging:** prohibido `print()` fuera de bloques `if __name__ == "__main__"` de prueba. Usar `logging` con nivel y timestamp; configurar `basicConfig` **solo** en los puntos de entrada (`main.py`, scripts), no en módulos. ⚠️ `config.py:38`; `basicConfig` repetido en loader/transformer/predictor.
-* **Configuración centralizada:** constantes compartidas (BBOX, SRID, intervalos, horas pico) se definen una vez en `src/config.py`. ⚠️ P9: hay tres BBOX distintos.
+* **Configuración centralizada:** constantes compartidas se definen una sola vez: la zona de estudio en `src/zona.py` (un test impide definir otro `BBOX`), el resto (SRID, intervalos, horas pico) en `src/config.py`. ✅
 
 ## 3. Comunicación con APIs externas
 
 * **Reintentos:** ante `429` o `5XX`, backoff exponencial con jitter (`TOMTOM_TIEMPO_BASE · 2^n + U(0,1)` s, máximo `TOMTOM_MAX_REINTENTOS` = 4). Errores `4XX` restantes son fatales para ese punto. ✅
 * **Timeouts:** 10 s por petición. ✅
 * **Concurrencia:** semáforo de `TOMTOM_LIMITE_CONCURRENCIA` = 20. ✅
-* **Economía de peticiones:** el consumo diario debe caber en la cuota de TomTom. Con N puntos y ciclos cada M minutos: `N × ciclos/día ≤ cuota`. El orquestador debe respetar `HORAS_PICO` y/o reducir N. ⚠️ `HORAS_PICO` no se usa; 475 puntos × 96 ciclos ≈ 45 600 req/día. Último estado del ETL: todas las peticiones con HTTP 403.
+* **Economía de peticiones:** el consumo diario debe caber en la cuota de TomTom. Con N puntos y ciclos cada M minutos: `N × ciclos/día ≤ cuota`. El orquestador debe respetar `HORAS_PICO` y/o reducir N. Ningún punto de monitoreo puede quedar fuera de la zona de estudio (`generador_topologia.filtrar_en_zona`). ⚠️ `HORAS_PICO` no se usa; 440 puntos × 96 ciclos ≈ 42 000 req/día. Último estado del ETL: todas las peticiones con HTTP 403.
 
 ## 4. Tratamiento de datos
 
@@ -63,9 +66,9 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 * El grafo es `dim_calles_osm` (aristas, `id/source/target`, solo `activo`) + `dim_calles_osm_vertices_pgr` (nodos = IDs de nodo OSM), **dirigido**: siempre `directed => true` y `reverse_cost = -1`.
 * El costo de una arista se expresa en **segundos** (tiempo de recorrido con tráfico), nunca en metros, y se calcula en una vista SQL (`v_costos_grafo`), no en Python.
-* La red y la topología se regeneran juntas con `scripts/osmnx_loader.py`, que valida al final con `pgr_connectedComponents` y aristas sin vértice (hoy: 1 componente, 10 844 vértices, 0 huérfanas).
+* La red y la topología se regeneran juntas con `scripts/osmnx_loader.py`, que valida al final con `pgr_connectedComponents` y aristas sin vértice (hoy: 1 componente, 28 008 vértices, 0 huérfanas).
 * Detalle completo en [`ROUTING.md`](ROUTING.md).
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (62 tests en verde al 2026-11-09)
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (69 tests en verde al 2026-11-09)

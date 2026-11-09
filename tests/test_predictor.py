@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 # config.py exige estas variables al importarse; valores ficticios para pruebas sin BD.
@@ -67,6 +67,7 @@ class TestEjecutar:
     def test_usa_la_referencia_del_ciclo_como_timestamp(self):
         engine = MagicMock()
         with patch.object(predictor, "leer_lecturas_recientes", return_value=_lecturas([T1, T2])), \
+             patch.object(predictor, "_ahora", return_value=T2), \
              patch.object(predictor, "ciclo_ya_calculado", return_value=False), \
              patch.object(predictor, "leer_centroides_osm", return_value=_calles_osm()), \
              patch.object(predictor, "guardar_resultados") as guardar:
@@ -78,6 +79,7 @@ class TestEjecutar:
     def test_ciclo_ya_calculado_no_recalcula(self):
         engine = MagicMock()
         with patch.object(predictor, "leer_lecturas_recientes", return_value=_lecturas([T1])), \
+             patch.object(predictor, "_ahora", return_value=T1), \
              patch.object(predictor, "ciclo_ya_calculado", return_value=True) as ya, \
              patch.object(predictor, "leer_centroides_osm") as centroides, \
              patch.object(predictor, "guardar_resultados") as guardar:
@@ -85,6 +87,20 @@ class TestEjecutar:
 
         ya.assert_called_once_with(engine, T1)
         centroides.assert_not_called()
+        guardar.assert_not_called()
+
+    def test_lecturas_mas_viejas_que_la_compresion_no_se_infieren(self):
+        # Sus chunks pueden estar comprimidos (migración 008): ON CONFLICT no se
+        # permite ahí, y un "tráfico actual" de hace más de una semana no sirve.
+        engine = MagicMock()
+        ahora = T1 + predictor.ANTIGUEDAD_MAXIMA + timedelta(minutes=1)
+        with patch.object(predictor, "leer_lecturas_recientes", return_value=_lecturas([T1])), \
+             patch.object(predictor, "_ahora", return_value=ahora), \
+             patch.object(predictor, "ciclo_ya_calculado") as ya, \
+             patch.object(predictor, "guardar_resultados") as guardar:
+            predictor.ejecutar(engine)
+
+        ya.assert_not_called()
         guardar.assert_not_called()
 
     def test_sin_lecturas_no_falla_ni_escribe(self):

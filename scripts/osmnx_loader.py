@@ -32,12 +32,18 @@ Identidad de las aristas (P3/P4 de docs/DATABASE.md):
 """
 
 import logging
+import sys
+from pathlib import Path
 
 import geopandas as gpd
 import osmnx as ox
 from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert, text
 
 import config
+
+# src/ al FINAL del path: así `config` sigue resolviendo a scripts/config.py.
+sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+import zona  # noqa: E402
 from osm_utils import id_determinista, normalizar_nombre, normalizar_oneway, normalizar_tipo, parsear_maxspeed
 
 logging.basicConfig(
@@ -52,9 +58,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DB_URL = config.DB_URL
 
-# Bounding box explícito: "San Luis Potosí, Mexico" es ambiguo en Nominatim
-# (puede resolver al estado completo). Ver P9 en docs/DATABASE.md.
-BBOX = (-101.03, 22.11, -100.96, 22.19)  # (lon_min, lat_min, lon_max, lat_max)
+# Zona: bounding box explícito y compartido con los puntos TomTom (src/zona.py).
+# No usar un nombre de lugar: "San Luis Potosí, Mexico" es ambiguo en Nominatim.
 
 # Tipos de vía incluidos. Se excluyen peatonales, ciclovías, service y track.
 TIPOS_VIA = {
@@ -326,7 +331,7 @@ def ejecutar():
     log.info("=== osmnx_loader.py iniciando ===")
     engine = create_engine(DB_URL, pool_pre_ping=True)
 
-    nodos, aristas = descargar_red_vial(BBOX)
+    nodos, aristas = descargar_red_vial(zona.bbox_osmnx())
     aristas_reg, nodos_reg = limpiar_red(nodos, aristas, TIPOS_VIA)
     sincronizar_db(aristas_reg, nodos_reg, engine)
     validar_y_resumir(engine)

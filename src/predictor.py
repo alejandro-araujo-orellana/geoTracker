@@ -24,7 +24,7 @@ Dependencias:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import geopandas as gpd
 import numpy as np
@@ -52,16 +52,14 @@ log = logging.getLogger(__name__)
 # docker-compose o variables de entorno.
 DB_URL = config.DB_URL
 
-# Bounding box de la zona metropolitana de SLP en WGS84 (lon_min, lat_min, lon_max, lat_max).
-# Estos valores cubren la mancha urbana principal. Amplíalos si tu red de avenidas
-# cubre zonas periféricas como Soledad de Graciano Sánchez.
-#BBOX = (-101.05, 22.08, -100.89, 22.21)
-BBOX = (22.101,-101.045,22.219,-100.906)
+# La zona de estudio ya no se define aquí: los puntos objetivo son las calles
+# de dim_calles_osm, cargadas con la zona única de zona.py (P9).
 
-# Resolución de la grilla: distancia entre puntos en METROS.
-# 200m → grilla densa (~2500 puntos sobre SLP), buena para heatmap detallado.
-# 500m → grilla ligera (~400 puntos), útil para pruebas rápidas.
-GRID_RESOLUTION_M = 200
+# Antigüedad máxima de la lectura más reciente para inferir. Igual al
+# compress_after de la migración 008: más allá, el chunk destino puede estar
+# comprimido (TimescaleDB 2.10 no admite ON CONFLICT ahí) y además un "tráfico
+# actual" de hace más de una semana no sirve para el mapa de calor ni el ruteo.
+ANTIGUEDAD_MAXIMA = timedelta(days=7)
 
 # Número de vecinos medidos que participan en cada cálculo IDW.
 # Con K=5 el resultado es robusto sin ser dominado por un solo segmento atípico.
@@ -147,6 +145,10 @@ def referencia_ciclo(gdf_fuentes: gpd.GeoDataFrame) -> datetime:
     restricción uq_trafico_calles_ciclo descarta el duplicado (P6).
     """
     return gdf_fuentes["timestamp_lectura"].max().to_pydatetime()
+
+
+def _ahora() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def ciclo_ya_calculado(engine, timestamp_ref: datetime) -> bool:
@@ -447,6 +449,13 @@ def ejecutar(engine):
         return
 
     timestamp = referencia_ciclo(gdf_fuentes_geo)
+    if _ahora() - timestamp > ANTIGUEDAD_MAXIMA:
+        log.warning(
+            f"La lectura más reciente es de {timestamp.isoformat()} (más de "
+            f"{ANTIGUEDAD_MAXIMA.days} días): no hay tráfico actual que inferir. "
+            "¿El ETL está obteniendo datos de TomTom?"
+        )
+        return
     if ciclo_ya_calculado(engine, timestamp):
         log.info(f"El estado del tráfico de {timestamp.isoformat()} ya fue inferido; se omite.")
         return

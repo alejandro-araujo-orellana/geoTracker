@@ -1,7 +1,7 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–007 el mismo día.
+> y actualizado tras aplicar las migraciones 001–008 y ampliar la red OSM a la zona única el mismo día.
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
@@ -36,11 +36,11 @@ Sistemas de referencia usados:
                              ▼
  OSM ──osmnx_loader──▶ ┌─────────────────────┐        ┌────────────────────────────┐
                        │ dim_calles_osm      │◀─(FK)──│ trafico_calles  hypertable │
-                       │  24 574 aristas     │        │  congestión inferida/calle │
+                       │  67 464 aristas     │        │  congestión inferida/calle │
                        │  source/target ─────┼──┐     └────────────────────────────┘
                        └─────────────────────┘  │
                        ┌─────────────────────────▼──┐
-                       │ dim_calles_osm_vertices_pgr│  10 844 nodos (intersecciones)
+                       │ dim_calles_osm_vertices_pgr│  28 008 nodos (intersecciones)
                        └────────────────────────────┘
 ```
 
@@ -57,6 +57,8 @@ Sistemas de referencia usados:
 Estado: 482 filas, **todas con `geom`** (la migración 003 rellenó las 282 que faltaban desde el JSONB).
 `loader.py` escribe `geom` en cada upsert: inserta los segmentos nuevos y completa la geometría de
 los que la tenían en NULL. Una geometría existente no se sobrescribe.
+35 de estos segmentos quedaron fuera de la zona de estudio (P9) y ya no se miden; se conservan por
+su histórico en `fact_lecturas_trafico`.
 
 ### `fact_lecturas_trafico` — hechos de tráfico (hypertable sobre `timestamp_lectura`)
 | Columna | Tipo | Notas |
@@ -68,7 +70,9 @@ los que la tenían en NULL. Una geometría existente no se sobrescribe.
 | `nivel_congestion` | `double precision` | `currentTravelTime / freeFlowTravelTime` (1.0 = flujo libre; observado 0–8, media 1.14) |
 
 Restricción `uq_lectura_por_calle UNIQUE (timestamp_lectura, id_segmento)` → idempotencia.
-Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Compresión y retención **no configuradas**.
+Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Chunks de 7 días. Compresión a los 7 días
+(`segmentby id_segmento`, `orderby timestamp_lectura DESC`). **Sin retención**: son los datos crudos y
+la base para costos históricos por hora del día.
 
 ### `dim_calles_osm` — red vial completa de OSM (aristas del grafo)
 | Columna | Tipo | Notas |
@@ -79,7 +83,7 @@ Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Compresión y retención **no co
 | `nombre` | `text` | NULL si no tiene nombre. Si OSM tiene varios, se guarda el primero en orden alfabético |
 | `tipo_via` | `text` NOT NULL | `highway` de OSM. Si la arista fusiona varios tipos, se guarda el de mayor jerarquía |
 | `longitud_m` | `double precision` | Longitud en metros (osmnx) |
-| `maxspeed_kmh` | `double precision` | Límite de OSM en km/h (escaso: ~700 aristas) |
+| `maxspeed_kmh` | `double precision` | Límite de OSM en km/h (escaso: ~1 500 aristas) |
 | `oneway` | `boolean` | Sentido único según OSM |
 | `activo` | `boolean` NOT NULL default TRUE | FALSE si la arista ya no existe en la última descarga de OSM. No se borra porque `trafico_calles` la referencia |
 | `geom` | `geometry(LineString,4326)` | **El sentido de la línea es el sentido de circulación** |
@@ -88,8 +92,9 @@ Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Compresión y retención **no co
 
 Índices: GiST en `geom` y `centroide_m`; btree en `tipo_via`, `source`, `target`, `activo`; único en `(u, v, k)`.
 
-Datos: 24 574 aristas activas (19 511 residential), 10 844 vértices, **1 único componente conexo**,
-29 auto-lazos (`source = target`).
+Datos: 67 464 aristas activas (54 588 residential) en la zona única de `src/zona.py`, 28 008 vértices,
+**1 único componente conexo**. Hasta el 2026-11-09 la red cubría solo el centro (24 574 aristas); al
+ampliarla, esas aristas conservaron su `osm_id` y se agregaron 42 890.
 
 Carga: `scripts/osmnx_loader.py` hace todo en una transacción: staging → adopción de filas antiguas por
 geometría → upsert por `(u, v, k)` → desactivación de aristas desaparecidas → sincronización de vértices
@@ -97,7 +102,8 @@ geometría → upsert por `(u, v, k)` → desactivación de aristas desaparecida
 `PYTHONHASHSEED` distintos.
 
 **Direccionalidad:** proviene de un grafo dirigido de osmnx (`network_type="drive"`). Una calle de
-doble sentido aparece como **dos aristas** con geometría invertida (17 491 aristas tienen par inverso);
+doble sentido aparece como **dos aristas** con geometría invertida (en la red original, 17 491 de
+24 574 aristas tenían par inverso);
 una calle de un solo sentido aparece como **una** arista. Por tanto, para Dijkstra se debe usar
 `directed => true` y `reverse_cost = -1`. Usar `reverse_cost = cost` permitiría circular en contrasentido.
 
@@ -132,6 +138,12 @@ sobre los mismos datos no duplica filas (verificado en una copia de la BD).
 Índices: `trafico_calles_timestamp_calculo_idx` (btree `timestamp_calculo DESC`, el que crea TimescaleDB
 por defecto) y el único `uq_trafico_calles_ciclo`.
 
+Volumen y ciclo de vida (migración 008): con la red ampliada son ~67 k filas por ciclo (~6.5 M/día con
+ciclos cada 15 min). Chunks de **1 día** (los anteriores al cambio son de 7), **compresión** a los 7 días
+(`segmentby osm_id`, `orderby timestamp_calculo DESC`; en la copia de prueba 45 MB → 31 MB) y
+**retención de 365 días**. Como TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos,
+`predictor.py` no infiere si la lectura más reciente tiene más de 7 días (`ANTIGUEDAD_MAXIMA`).
+
 Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 
 ### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
@@ -155,6 +167,7 @@ BD existente y sobre una BD vacía.
 | 005 | (P5) PK e índice GiST en vértices; tipa `geom` como `Point,4326`; quita `in_edges/out_edges` |
 | 006 | (P6) `UNIQUE (timestamp_calculo, osm_id)` en `trafico_calles` |
 | 007 | (P7) Elimina el índice duplicado `idx_trafico_calles_tiempo` |
+| 008 | (P8) Compresión a 7 días en ambas hypertables; retención de 365 días en `trafico_calles`; chunks diarios en `trafico_calles` |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 
@@ -169,7 +182,7 @@ BD existente y sobre una BD vacía.
 | P5 | ✅ **Resuelto** — vértices sin PK ni GiST | — | Migración 005; el nodo más cercano usa `Index Scan using idx_vertices_geom` |
 | P6 | ✅ **Resuelto** — `trafico_calles` sin unicidad | — | Migración 006; `timestamp_calculo` = referencia del ciclo; `ON CONFLICT DO NOTHING` + omisión de ciclos ya inferidos |
 | P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
-| P8 | Sin políticas de compresión/retención | `trafico_calles` crece ~24 k filas por ciclo (~2.3 M/día) | `add_compression_policy` y `add_retention_policy` |
-| P9 | BBOX distintos: topología TomTom `(22.101,-101.045)–(22.219,-100.906)`, OSM `(22.11,-101.03)–(22.19,-100.96)` | Puntos medidos fuera de la red OSM | Unificar en `config.py` |
+| P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
+| P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
 | P10 | `trafico_inferido` obsoleta | Ruido en el esquema | Eliminar tras migrar paneles de Grafana |
-| P11 | 29 auto-lazos en `dim_calles_osm` | Inofensivos para Dijkstra, pero ruido | Filtrar en la vista de costos |
+| P11 | Auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original) | Inofensivos para Dijkstra, pero ruido | Filtrar en la vista de costos |

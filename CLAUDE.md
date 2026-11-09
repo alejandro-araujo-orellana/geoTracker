@@ -65,9 +65,9 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 
 | Fase | Código | Frecuencia | Salida |
 |---|---|---|---|
-| 1. Puntos de monitoreo | `scripts/generador_topologia.py` (+ `cliente_overpass.py`, `procesador_espacial.py`) | Una vez | `data/vialidades_maestras.json` (475 puntos; vías trunk/primary/secondary/tertiary muestreadas cada 1 km en UTM 14N) |
+| 1. Puntos de monitoreo | `scripts/generador_topologia.py` (+ `cliente_overpass.py`, `procesador_espacial.py`) | Una vez | `data/vialidades_maestras.json` (440 puntos; vías trunk/primary/secondary/tertiary muestreadas cada 1 km en UTM 14N, solo dentro de la zona) |
 | 0. Esquema | `src/migrate.py` + `db/migrations/` | Al arrancar | Tablas, índices, hypertables |
-| 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`) | Cada varios meses | `dim_calles_osm` (24 574 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (10 844 nodos) |
+| 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`) | Cada varios meses | `dim_calles_osm` (67 464 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (28 008 nodos) |
 | 4. ETL + inferencia | `src/main.py` | Cada 15 min | `fact_lecturas_trafico`, `trafico_calles` |
 | 5. Ruteo | `src/router.py` / `services/api` | Bajo demanda | **Pendiente** — ver `docs/ROUTING.md` |
 
@@ -76,6 +76,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | Módulo | Responsabilidad |
 |---|---|
 | `config.py` | Variables de entorno, carga de `vialidades_maestras.json`, constantes (`HORAS_PICO`, límites TomTom) |
+| `zona.py` | **Zona de estudio única** (bbox de la zona metropolitana de SLP + Soledad). La usan `generador_topologia.py` y `osmnx_loader.py`; nunca definas otro bbox |
 | `extractor.py` | HTTP asíncrono a TomTom; semáforo de 20; backoff exponencial + jitter; timeout 10 s |
 | `migrate.py` | Aplica migraciones pendientes al arrancar |
 | `transformer.py` | Separa cada respuesta en paquete estático `(id, nombre, coordenadas, wkt)` y dinámico (velocidad, tiempo, congestión) |
@@ -114,7 +115,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. ETL detenido: TomTom devolvía HTTP 403 (cuota agotada: ~45 600 req/día). Aplicar `HORAS_PICO` o reducir puntos.
-2. Saneamiento de esquema: P1–P7 resueltos (2026-11-09). Pendientes: P8–P11 (ver `docs/DATABASE.md`).
+1. ETL detenido: TomTom devolvía HTTP 403 (cuota agotada: 440 puntos × 96 ciclos ≈ 42 000 req/día). Aplicar `HORAS_PICO` o reducir puntos.
+2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).
