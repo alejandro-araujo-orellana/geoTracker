@@ -80,7 +80,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | `migrate.py` | Aplica migraciones pendientes al arrancar |
 | `transformer.py` | Separa cada respuesta en paquete estático `(id, nombre, coordenadas, wkt)` y dinámico (velocidad, tiempo, congestión) |
 | `loader.py` | Upsert masivo: segmentos (`geom` vía `ST_GeomFromText`, solo completa si era NULL) y lecturas (`ON CONFLICT DO NOTHING`) |
-| `predictor.py` | IDW: última lectura por segmento → puntos cada 100 m → K=5 vecinos (p=2, radio 600 m) sobre centroides OSM → `trafico_calles` |
+| `predictor.py` | IDW: última lectura por segmento → puntos cada 100 m → K=5 vecinos (p=2, radio 600 m) sobre centroides OSM activos → `trafico_calles`. Idempotente: `timestamp_calculo` = lectura más reciente; omite ciclos ya inferidos |
 
 ### Base de datos (resumen — detalle en `docs/DATABASE.md`)
 
@@ -115,6 +115,6 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 ## Estado actual y prioridades
 
 1. ETL detenido: TomTom devolvía HTTP 403 (cuota agotada: ~45 600 req/día). Aplicar `HORAS_PICO` o reducir puntos.
-2. Saneamiento de esquema: P1–P5 resueltos (2026-11-09). Pendientes: P6 (unicidad en `trafico_calles`), P7–P11.
+2. Saneamiento de esquema: P1–P6 resueltos (2026-11-09). Pendientes: P7–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

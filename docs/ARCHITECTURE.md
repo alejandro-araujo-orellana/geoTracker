@@ -55,7 +55,7 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 * **Aislamiento de geometría:** las tablas de hechos (`fact_lecturas_trafico`, `trafico_calles`) nunca contienen geometría; se obtiene por JOIN con su dimensión. ✅
 * **Validación de esquema de la API:** el transformador usa `.get()` y asigna `None` ante claves ausentes; no debe lanzar `KeyError`. ✅
 * **Inserción masiva:** escrituras por lotes (`insert().values(lista)` o `executemany` en lotes ≥ 500). Prohibido un `INSERT` por fila en bucle. ✅
-* **Idempotencia:** toda inserción usa `ON CONFLICT DO NOTHING` / `DO UPDATE` sobre una restricción única. Ejecutar un ciclo dos veces no duplica datos. ⚠️ P6: `trafico_calles` no tiene restricción única.
+* **Idempotencia:** toda inserción usa `ON CONFLICT DO NOTHING` / `DO UPDATE` sobre una restricción única. Ejecutar un ciclo dos veces no duplica datos. Los timestamps de datos derivados identifican los **datos de origen**, no la hora en que se calcularon (p. ej. `trafico_calles.timestamp_calculo` = lectura TomTom más reciente usada); si no, la restricción única nunca detectaría el duplicado. ✅
 * **Identificadores estables:** los IDs de dimensiones deben ser deterministas entre ejecuciones: nunca `hash()` de Python ni nada que dependa del orden de un `set` (las listas de atributos de osmnx cambian de orden con `PYTHONHASHSEED`). ✅
 * **Congestión:** `nivel_congestion = currentTravelTime / freeFlowTravelTime`; 1.0 = flujo libre, >1 = congestión; si `freeFlowTravelTime` es 0/None → 1.0.
 
@@ -68,4 +68,4 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (56 tests en verde al 2026-11-09)
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (62 tests en verde al 2026-11-09)

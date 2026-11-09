@@ -71,7 +71,7 @@ Por lo tanto **`reverse_cost = -1`** y `directed => true`. Ver `DATABASE.md › 
 
 ### Prerrequisitos
 Ya aplicados (migraciones 004–005): PK + GiST en vértices, `source/target` = nodos OSM,
-`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (006):
+`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (007):
 ```sql
 CREATE TABLE dim_velocidad_tipo_via (
     tipo_via        text PRIMARY KEY,
@@ -125,8 +125,8 @@ ORDER BY r.seq;
 
 ## Plan de implementación
 
-1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P5 (2026-11-09). Pendiente P6 (unicidad en `trafico_calles`).
-2. **Migración de ruteo (006):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
+1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P6 (2026-11-09).
+2. **Migración de ruteo (007):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
 3. **Módulo `src/router.py`** (o servicio en `services/api`): `ruta_mas_rapida(origen, destino) -> Ruta` con snap + Dijkstra + suma de distancia/ETA; GeoJSON de salida.
 4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
 5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.

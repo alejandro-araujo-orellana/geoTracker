@@ -24,7 +24,7 @@ Dependencias:
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 import geopandas as gpd
 import numpy as np
@@ -99,7 +99,7 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
     el IDW. El JOIN con dim_segmentos nos da la geometría en una sola consulta.
 
     Retorna un GeoDataFrame con columnas:
-        id_segmento, nombre_via, nivel_congestion, geom (LineString WGS84)
+        id_segmento, nombre_via, nivel_congestion, timestamp_lectura, geom (LineString WGS84)
     """
     log.info("Etapa 1: leyendo lecturas recientes de la base de datos...")
 
@@ -108,6 +108,7 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
             SELECT
                 id_segmento,
                 nivel_congestion,
+                timestamp_lectura,
                 ROW_NUMBER() OVER (
                     PARTITION BY id_segmento
                     ORDER BY timestamp_lectura DESC
@@ -118,6 +119,7 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
             d.id_segmento,
             d.nombre_via,
             u.nivel_congestion,
+            u.timestamp_lectura,
             d.geom
         FROM dim_segmentos_viales d
         JOIN ultima_lectura u
@@ -135,6 +137,25 @@ def leer_lecturas_recientes(engine) -> gpd.GeoDataFrame:
     except Exception as e:
         log.error(f"Error fatal extrayendo geometrias de PostGIS: {e}")
         raise
+
+
+def referencia_ciclo(gdf_fuentes: gpd.GeoDataFrame) -> datetime:
+    """
+    Identificador del estado del tráfico que se va a inferir: la lectura TomTom
+    más reciente entre las fuentes. Se guarda como timestamp_calculo, de modo que
+    inferir dos veces sobre los mismos datos produce el mismo timestamp y la
+    restricción uq_trafico_calles_ciclo descarta el duplicado (P6).
+    """
+    return gdf_fuentes["timestamp_lectura"].max().to_pydatetime()
+
+
+def ciclo_ya_calculado(engine, timestamp_ref: datetime) -> bool:
+    """True si trafico_calles ya tiene la inferencia de este estado del tráfico."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text("SELECT EXISTS (SELECT 1 FROM trafico_calles WHERE timestamp_calculo = :ts)"),
+            {"ts": timestamp_ref},
+        ).scalar()
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +387,9 @@ def guardar_resultados(
     lat y lon sueltos, aqui cada fila referencia un osm_id real de 
     dim_calles_osm, Grafana asi podra hacer JOIN para obtener nombre,
     tipo de via y geometria completa de cada calle.
+
+    Idempotente (P6): timestamp_calculo es la referencia del ciclo y el INSERT
+    descarta las filas (timestamp_calculo, osm_id) que ya existan.
     """
     log.info("Etapa 5: guardando resultados en trafico_calles...")
 
@@ -386,6 +410,7 @@ def guardar_resultados(
         VALUES
             (:timestamp_calculo, :osm_id,
              :nivel_congestion_inf, :metodo_inferencia)
+        ON CONFLICT ON CONSTRAINT uq_trafico_calles_ciclo DO NOTHING
     """)
 
     LOTE = 1000
@@ -394,11 +419,14 @@ def guardar_resultados(
 
     with engine.begin() as conn:
         for i in range(0, total, LOTE):
-             lote = registros[i:i + LOTE]
-             conn.execute(insert_sql, lote)
-             insertados += len(lote)
+            lote = registros[i:i + LOTE]
+            resultado = conn.execute(insert_sql, lote)
+            insertados += max(resultado.rowcount, 0)
 
-    log.info(f"  → {insertados:,} calles insertadas correctamente en trafico_calles")
+    log.info(
+        f"  → {insertados:,}/{total:,} calles insertadas en trafico_calles "
+        f"(el resto ya existía para este ciclo)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,12 +439,18 @@ def ejecutar(engine):
     Puede llamarse directamente o importarse desde el ETL principal.
     """
     log.info("=== predictor.py iniciando ===")
-    timestamp = datetime.now(tz=timezone.utc)
-
-    #engine = create_engine(DB_URL, pool_pre_ping=True)
 
     # Etapa 1
     gdf_fuentes_geo = leer_lecturas_recientes(engine)
+    if gdf_fuentes_geo.empty:
+        log.warning("Sin lecturas con geometría: no hay nada que inferir.")
+        return
+
+    timestamp = referencia_ciclo(gdf_fuentes_geo)
+    if ciclo_ya_calculado(engine, timestamp):
+        log.info(f"El estado del tráfico de {timestamp.isoformat()} ya fue inferido; se omite.")
+        return
+    log.info(f"Infiriendo el estado del tráfico de {timestamp.isoformat()}")
 
     # Etapa 2
     gdf_fuentes_m = muestrear_puntos_linea(gdf_fuentes_geo)
