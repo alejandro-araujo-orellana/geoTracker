@@ -1,10 +1,20 @@
 """
 predictor.py
 ============
-Módulo de inferencia espacial de tráfico mediante IDW (Inverse Distance Weighting).
+Estado del tráfico en TODA la red vial OSM → trafico_calles (mapa de calor y
+costo de ruteo).
+
+    versión 3 (actual, D13) — fuente: vector tiles
+        fact_flujo_aristas (última pasada, < VENTANA_TILES)
+          → aristas medidas: congestión = 1 / traffic_level   (metodo 'TILE')
+          → resto: IDW desde las aristas medidas abiertas     (metodo 'IDW_TILE')
+    versión 2 (respaldo si no hay pasada reciente) — fuente: Flow Segment Data
+        fact_lecturas_trafico (< VENTANA_LECTURAS) → IDW     (metodo 'IDW_OSM')
+
+Lo que sigue describe la versión 2, que se conserva como respaldo.
 
 Posición en el pipeline:
-    ETL (TomTom → fact_lecturas_trafico)  →  predictor.py  →  trafico_inferido  →  Grafana
+    ETL (TomTom → fact_lecturas_trafico)  →  predictor.py  →  trafico_calles  →  Grafana
 
 Responsabilidad:
     Tomar las lecturas más recientes de las avenidas medidas e inferir
@@ -30,8 +40,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
-from shapely.geometry import Point, box
-from sqlalchemy import create_engine, text
+from sqlalchemy import BigInteger, Column, DateTime, Float, MetaData, Table, Text, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 import config
 
 # ---------------------------------------------------------------------------
@@ -67,6 +77,15 @@ ANTIGUEDAD_MAXIMA = timedelta(days=7)
 # 6 h ≈ el tiempo en que la rotación renueva todos los puntos en horas pico con
 # ~800 peticiones/día; en horas valle habrá menos fuentes (más calles en 1.0).
 VENTANA_LECTURAS = timedelta(hours=6)
+
+# v3: se usa la última pasada de tiles si tiene menos de esto (2 ciclos de 15 min).
+VENTANA_TILES = timedelta(minutes=30)
+
+# v3: tope de congestión medida. traffic_level ≤ 0.1 (≤ 10 % de la velocidad
+# libre) o vía cerrada → 10. El tope de 3.0 de la v2 subestimaba atascos reales
+# (Segment Data llegó a medir 8). Las vías cerradas se distinguen en
+# fact_flujo_aristas.cerrada; el ruteo debe excluirlas, no solo encarecerlas.
+CONGESTION_MAX = 10.0
 
 # Número de vecinos medidos que participan en cada cálculo IDW.
 # Con K=5 el resultado es robusto sin ser dominado por un solo segmento atípico.
@@ -161,6 +180,63 @@ def referencia_ciclo(gdf_fuentes: gpd.GeoDataFrame) -> datetime:
 
 def _ahora() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# v3 — vector tiles
+# ---------------------------------------------------------------------------
+def leer_flujo_reciente(engine) -> pd.DataFrame:
+    """Aristas medidas en la última pasada de tiles, si es de los últimos VENTANA_TILES."""
+    sql = text("""
+        WITH ultima AS (
+            SELECT max(timestamp_lectura) AS ts
+            FROM fact_flujo_aristas
+            WHERE timestamp_lectura >= :desde
+        )
+        SELECT f.osm_id, f.nivel_relativo, f.cerrada, f.timestamp_lectura
+        FROM fact_flujo_aristas f
+        JOIN ultima u ON f.timestamp_lectura = u.ts
+    """)
+    with engine.connect() as conn:
+        filas = conn.execute(sql, {"desde": _ahora() - VENTANA_TILES}).fetchall()
+    return pd.DataFrame(filas, columns=["osm_id", "nivel_relativo", "cerrada", "timestamp_lectura"])
+
+
+def congestion_desde_nivel(nivel: np.ndarray, cerrada: np.ndarray) -> np.ndarray:
+    """traffic_level (velocidad actual / libre) → nivel_congestion (tiempo actual / libre) en [1, CONGESTION_MAX]."""
+    nivel = np.asarray(nivel, dtype=float)
+    with np.errstate(divide="ignore"):
+        congestion = np.where(nivel > 0, 1.0 / nivel, CONGESTION_MAX)
+    congestion = np.clip(congestion, 1.0, CONGESTION_MAX)
+    return np.where(np.asarray(cerrada, dtype=bool), CONGESTION_MAX, congestion)
+
+
+def inferir_desde_tiles(gdf_calles: gpd.GeoDataFrame, flujo: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
+    """
+    Congestión para cada calle de gdf_calles (mismo orden):
+      - medida en la pasada → valor directo ('TILE')
+      - sin medir → IDW desde las aristas medidas NO cerradas ('IDW_TILE')
+    """
+    medidas = flujo.assign(
+        congestion=congestion_desde_nivel(flujo["nivel_relativo"].to_numpy(), flujo["cerrada"].to_numpy())
+    ).set_index("osm_id")
+    medidas = medidas[~medidas.index.duplicated()]
+
+    es_medida = gdf_calles["osm_id"].isin(medidas.index).to_numpy()
+    congestion = np.ones(len(gdf_calles))
+    congestion[es_medida] = medidas.loc[gdf_calles.loc[es_medida, "osm_id"], "congestion"].to_numpy()
+
+    abiertas = gdf_calles["osm_id"].isin(medidas.index[~medidas["cerrada"].astype(bool)]).to_numpy()
+    fuentes = gdf_calles[abiertas].assign(nivel_congestion=congestion[abiertas])
+    objetivo = gdf_calles[~es_medida]
+    if len(objetivo) and len(fuentes):
+        congestion[~es_medida] = aplicar_idw(objetivo, fuentes, K_VECINOS, POTENCIA_IDW, DISTANCIA_MAX_M,
+                                             limites=(1.0, CONGESTION_MAX))
+
+    log.info(f"  → {es_medida.sum():,} calles medidas por tiles, {(~es_medida).sum():,} inferidas por IDW "
+             f"({len(fuentes):,} fuentes abiertas)")
+    metodos = ["TILE" if m else "IDW_TILE" for m in es_medida]
+    return congestion, metodos
 
 
 def ciclo_ya_calculado(engine, timestamp_ref: datetime) -> bool:
@@ -297,6 +373,7 @@ def aplicar_idw(
     k: int,
     potencia: float,
     distancia_max: float,
+    limites: tuple[float, float] = (1.0, 3.0),
 ) -> np.ndarray:
     """
     Calcula el nivel de congestión inferido en cada punto de la grilla
@@ -318,7 +395,8 @@ def aplicar_idw(
     (distancia = 0), su congestión inferida es la de esa fuente directamente,
     sin división por cero. Esto se maneja con np.where.
 
-    Retorna un array de forma (n_puntos_grilla,) con valores en [0, 1].
+    Retorna un array de forma (n_puntos_grilla,) recortado a `limites`
+    ([1, 3] en la v2; [1, CONGESTION_MAX] en la v3).
     """
     log.info(f"Etapa 4: aplicando IDW (K={k}, p={potencia})...")
 
@@ -372,8 +450,7 @@ def aplicar_idw(
         f"asignados a 1.0 ({fuera_de_rango.mean()*100:.1f}% de la grilla)"
     )
 
-    # Asegurar que el resultado esté en [0, 1] (puede salirse por error numérico)
-    congestion_inferida = np.clip(congestion_inferida, 1.0, 3.0)
+    congestion_inferida = np.clip(congestion_inferida, *limites)
 
     log.info(
         f"  → Congestión inferida: "
@@ -388,11 +465,21 @@ def aplicar_idw(
 # Etapa 5 — Escribir resultados en trafico_calles
 # ---------------------------------------------------------------------------
 
+_trafico_calles = Table(
+    "trafico_calles", MetaData(),
+    Column("timestamp_calculo", DateTime(timezone=True)),
+    Column("osm_id", BigInteger),
+    Column("nivel_congestion_inf", Float),
+    Column("metodo_inferencia", Text),
+)
+
+
 def guardar_resultados(
     engine,
     gdf_objetivo: gpd.GeoDataFrame,
     congestion_inferida: np.ndarray,
     timestamp_calculo: datetime,
+    metodos="IDW_OSM",
 ) -> None:
     """
     Inserta los puntos inferidos en la tabla trafico_calles.
@@ -404,38 +491,36 @@ def guardar_resultados(
 
     Idempotente (P6): timestamp_calculo es la referencia del ciclo y el INSERT
     descarta las filas (timestamp_calculo, osm_id) que ya existan.
+
+    metodos: un texto para todas las filas o una secuencia alineada con gdf_objetivo.
+
+    Rendimiento: un INSERT de SQLAlchemy Core con lista de dicts usa
+    "insertmanyvalues" (INSERT multi-fila por lotes). La versión anterior
+    (iterrows + text() fila a fila) tardaba ~30 s con 67 k calles.
     """
     log.info("Etapa 5: guardando resultados en trafico_calles...")
 
+    ids = gdf_objetivo["osm_id"].to_numpy()
+    if isinstance(metodos, str):
+        metodos = [metodos] * len(ids)
     registros = [
         {
-            "timestamp_calculo":    timestamp_calculo,
-            "osm_id":   int(row.osm_id),
+            "timestamp_calculo": timestamp_calculo,
+            "osm_id": int(osm_id),
             "nivel_congestion_inf": float(c),
-            "metodo_inferencia":    "IDW_OSM",
+            "metodo_inferencia": metodo,
         }
-        for (_, row), c in zip(gdf_objetivo.iterrows(), congestion_inferida)
+        for osm_id, c, metodo in zip(ids, congestion_inferida, metodos)
     ]
 
-    insert_sql = text("""
-        INSERT INTO trafico_calles
-            (timestamp_calculo, osm_id,
-             nivel_congestion_inf, metodo_inferencia)
-        VALUES
-            (:timestamp_calculo, :osm_id,
-             :nivel_congestion_inf, :metodo_inferencia)
-        ON CONFLICT ON CONSTRAINT uq_trafico_calles_ciclo DO NOTHING
-    """)
-
-    LOTE = 1000
+    # RETURNING: con insertmanyvalues, rowcount solo refleja el último lote;
+    # contar las filas devueltas da el total real insertado.
+    stmt = (pg_insert(_trafico_calles)
+            .on_conflict_do_nothing(constraint="uq_trafico_calles_ciclo")
+            .returning(_trafico_calles.c.osm_id))
     total = len(registros)
-    insertados = 0
-
     with engine.begin() as conn:
-        for i in range(0, total, LOTE):
-            lote = registros[i:i + LOTE]
-            resultado = conn.execute(insert_sql, lote)
-            insertados += max(resultado.rowcount, 0)
+        insertados = len(conn.execute(stmt, registros).fetchall())
 
     log.info(
         f"  → {insertados:,}/{total:,} calles insertadas en trafico_calles "
@@ -449,11 +534,34 @@ def guardar_resultados(
 
 def ejecutar(engine):
     """
-    Punto de entrada del script. Orquesta las cinco etapas en orden.
+    Punto de entrada. v3 (tiles) si hay una pasada reciente; si no, v2 (Segment Data).
     Puede llamarse directamente o importarse desde el ETL principal.
     """
     log.info("=== predictor.py iniciando ===")
 
+    flujo = leer_flujo_reciente(engine)
+    if not flujo.empty:
+        _ejecutar_desde_tiles(engine, flujo)
+    else:
+        log.info(f"Sin pasada de tiles en los últimos {VENTANA_TILES}: respaldo con Segment Data (v2).")
+        _ejecutar_desde_segment_data(engine)
+
+    log.info("=== predictor.py finalizado ===")
+
+
+def _ejecutar_desde_tiles(engine, flujo: pd.DataFrame) -> None:
+    timestamp = pd.Timestamp(flujo["timestamp_lectura"].max()).to_pydatetime()
+    if ciclo_ya_calculado(engine, timestamp):
+        log.info(f"La pasada de tiles de {timestamp.isoformat()} ya fue inferida; se omite.")
+        return
+    log.info(f"v3: infiriendo desde la pasada de tiles de {timestamp.isoformat()} ({len(flujo):,} aristas medidas)")
+
+    gdf_calles_osm = leer_centroides_osm(engine)
+    congestion, metodos = inferir_desde_tiles(gdf_calles_osm, flujo)
+    guardar_resultados(engine, gdf_calles_osm, congestion, timestamp, metodos=metodos)
+
+
+def _ejecutar_desde_segment_data(engine) -> None:
     # Etapa 1
     gdf_fuentes_geo = leer_lecturas_recientes(engine)
     if gdf_fuentes_geo.empty:
@@ -484,8 +592,6 @@ def ejecutar(engine):
 
     # Etapa 5
     guardar_resultados(engine, gdf_calles_osm, congestion, timestamp)
-
-    log.info("=== predictor.py finalizado ===")
 
 
 if __name__ == "__main__":

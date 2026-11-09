@@ -152,8 +152,8 @@ La escribe y la lee `src/presupuesto.py` para no exceder la cuota mensual (ver `
 | `id` | `bigint` serial | Sin PK |
 | `timestamp_calculo` | `timestamptz` NOT NULL | **Estado del tráfico inferido**: la lectura TomTom más reciente usada (`max(timestamp_lectura)`). Hasta el 2026-07-01 era la hora de cálculo |
 | `osm_id` | `bigint` NOT NULL FK → `dim_calles_osm(osm_id)` | |
-| `nivel_congestion_inf` | `double precision` NOT NULL | IDW, recortado a [1.0, 3.0] |
-| `metodo_inferencia` | `text` default `'IDW_OSM'` | |
+| `nivel_congestion_inf` | `double precision` NOT NULL | Tiempo actual / tiempo libre. v3: [1, 10]; v2 (IDW_OSM): [1, 3] |
+| `metodo_inferencia` | `text` default `'IDW_OSM'` | `TILE` = medida directa (vector tiles); `IDW_TILE` = inferida desde aristas medidas; `IDW_OSM` = v2 desde Segment Data (respaldo) |
 
 Restricción `uq_trafico_calles_ciclo UNIQUE (timestamp_calculo, osm_id)` (migración 006). `predictor.py`
 no recalcula si ese estado del tráfico ya existe, e inserta con `ON CONFLICT ... DO NOTHING`. Re-ejecutarlo
@@ -167,8 +167,10 @@ ciclos cada 15 min). Chunks de **1 día** (los anteriores al cambio son de 7), *
 (`segmentby osm_id`, `orderby timestamp_calculo DESC`; en la copia de prueba 45 MB → 31 MB) y
 **retención de 365 días**. Como TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos,
 `predictor.py` no infiere si la lectura más reciente tiene más de 7 días (`ANTIGUEDAD_MAXIMA`).
-Como fuentes del IDW solo usa lecturas de las últimas 6 h (`VENTANA_LECTURAS`): con el pool cada ciclo
-mide pocos puntos y las lecturas viejas no deben pasar por tráfico actual.
+
+Origen de cada ciclo (D13): v3 usa la última pasada de `fact_flujo_aristas` de los últimos 30 min y su
+`timestamp_lectura` como `timestamp_calculo` (~15 k filas `TILE` + ~52 k `IDW_TILE`). Si no hay pasada
+reciente, v2 usa Segment Data de las últimas 6 h (`VENTANA_LECTURAS`) con `IDW_OSM`.
 
 Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 

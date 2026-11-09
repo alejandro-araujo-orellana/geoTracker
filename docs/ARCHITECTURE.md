@@ -12,8 +12,8 @@ Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento c
 
 ## 0. Visión del sistema
 
-1. **Medir** el tráfico en 207 puntos de avenidas principales (TomTom Flow Segment Data), dentro de un pool mensual de peticiones.
-2. **Inferir** la congestión en toda la red vial OSM (~67.5 k aristas) por IDW → mapa de calor en Grafana.
+1. **Medir** el tráfico con TomTom: vector tiles como fuente principal (49 tiles cada 15 min) y Flow Segment Data (207 puntos) como secundaria, cada una con su pool mensual.
+2. **Medir e inferir** la congestión en toda la red vial OSM (~67.5 k aristas): ~15 k medidas por vector tiles, el resto por IDW → mapa de calor en Grafana.
 
 Ambos cubren la misma zona de estudio (`src/zona.py`): zona metropolitana de SLP incluida Soledad de
 Graciano Sánchez.
@@ -72,4 +72,4 @@ Graciano Sánchez.
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (120 tests en verde al 2026-11-09). La lógica que vive en SQL (asociación espacial) se prueba contra PostgreSQL real (`tests/test_asociador_db.py`, BD temporal).
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (131 tests en verde al 2026-11-09). La lógica que vive en SQL (asociación espacial) se prueba contra PostgreSQL real (`tests/test_asociador_db.py`, BD temporal).

@@ -185,7 +185,17 @@ Asociación **dirigida** (D9): cada línea del tile va a la arista OSM a < 12 m 
 - Cobertura: motorway/trunk/primary ~100 %, secondary 98 %, tertiary 84 %, residential 8 %; 15 037 aristas.
 - Tiempo: pasada de tiles + asociación ≈ 6 s (D11).
 
+**Predictor v3** (D13): aristas medidas → valor directo (`TILE`); resto → IDW desde las medidas abiertas
+(`IDW_TILE`). En un ciclo real: 15 039 medidas + 52 425 inferidas, solo 1 % de calles sin fuente cercana
+(con Segment Data era 72.5 %). Ciclo completo del ETL: 10.7 s.
+
+**Implicaciones para el ruteo** (pendiente, migración 011):
+- La vista de costos usa `trafico_calles.nivel_congestion_inf` del último ciclo, como estaba diseñado.
+- Además debe **excluir** las aristas con `fact_flujo_aristas.cerrada` en la última pasada: una vía cerrada
+  no es "lenta", es intransitable (en `trafico_calles` solo aparece con el tope 10).
+- El tope de congestión ahora es 10 (antes 3): los atascos severos pesan lo que realmente cuestan.
+
 ## Limitaciones conocidas
-- La congestión de calles residenciales es **inferida** por IDW desde las avenidas medidas, no medida.
-- El IDW recorta la congestión a [1, 3]; congestiones extremas (observadas hasta 8) quedan subestimadas.
+- La congestión de calles residenciales es en su mayoría **inferida** (los tiles miden ~8 % de ellas).
+- ~~El IDW recorta la congestión a [1, 3]~~ Resuelto en D13: tope 10 y valores medidos directos.
 - Si el ETL no corre (p. ej. TomTom 403), la vista cae a flujo libre (1.0) y la ruta deja de reflejar el tráfico.

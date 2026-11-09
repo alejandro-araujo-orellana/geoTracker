@@ -96,7 +96,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | `presupuesto.py` | Pool de peticiones a TomTom: cupo por ciclo según cuota mensual, hora (pico/valle/madrugada) y consumo en `consumo_api`; elige los puntos con lectura más antigua |
 | `transformer.py` | Separa cada respuesta en paquete estático `(id, nombre, coordenadas, wkt)` y dinámico (velocidad, tiempo, congestión) |
 | `loader.py` | Upsert masivo: segmentos (`geom` vía `ST_GeomFromText`, solo completa si era NULL) y lecturas (`ON CONFLICT DO NOTHING`) |
-| `predictor.py` | IDW: última lectura por segmento → puntos cada 100 m → K=5 vecinos (p=2, radio 600 m) sobre centroides OSM activos → `trafico_calles`. Idempotente: `timestamp_calculo` = lectura más reciente; omite ciclos ya inferidos |
+| `predictor.py` | **v3** (D13): última pasada de tiles → aristas medidas con su valor (`TILE`) + IDW (K=5, p=2, 600 m) desde las medidas abiertas para el resto (`IDW_TILE`). Respaldo **v2** con Segment Data (`IDW_OSM`). → `trafico_calles`. Idempotente: `timestamp_calculo` = timestamp del dato de origen |
 
 ### Base de datos (resumen — detalle en `docs/DATABASE.md`)
 
@@ -130,7 +130,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. Reestructuración a vector tiles (D8) en curso: ingesta lista (`fact_flujo_aristas`); falta el predictor v3 que use las aristas medidas. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
+1. Reestructuración a vector tiles (D8–D13) completa: ingesta (`fact_flujo_aristas`) y predictor v3. ETL listo para encenderse (ciclo ~11 s). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

@@ -84,6 +84,23 @@ fallo en tiles se registra y el ciclo sigue con Segment Data; el predictor corre
 **Por qué:** una pasada parcial dejaría zonas sin medir en el mismo instante. Con 200 000/mes el
 presupuesto diario (~6 000–8 000) cubre los 96 ciclos (4 704 tiles), así que no hace falta ponderar por hora.
 
+## D13 — Predictor v3: medido donde hay tiles, IDW solo para el resto (2026-11-09)
+**Decisión:**
+- Las aristas medidas en la última pasada de tiles (< 30 min) toman su valor directo:
+  `congestión = 1 / traffic_level`, recortado a [1, 10] (`metodo_inferencia = 'TILE'`).
+- Las demás se infieren por IDW usando como fuentes los centroides de las aristas medidas **no cerradas**
+  (`'IDW_TILE'`). Una vía cerrada no debe "pintar" congestión en sus vecinas.
+- Si no hay pasada reciente, se usa la v2 (Segment Data) como respaldo (`'IDW_OSM'`).
+- Tope de congestión 10 (antes 3): la v2 recortaba en 3 y subestimaba atascos reales (Segment Data llegó a
+  medir 8). Las vías cerradas toman el tope, pero el ruteo debe **excluirlas** usando
+  `fact_flujo_aristas.cerrada`, no solo encarecerlas.
+**Resultado (ciclo real):** 15 039 aristas medidas + 52 425 inferidas; solo 1 % de las calles sin fuente
+cercana (antes 72.5 %). Distribución medida: 76 % en flujo casi libre (≥ 0.8), 18 atascos severos (< 0.1)
+y 61 vías cerradas; ningún nivel 0 sin marca de cierre (no hay "sin dato" disfrazado de atasco).
+**También:** `guardar_resultados` pasa a INSERT por lotes de SQLAlchemy con `RETURNING` (antes `iterrows` +
+`text()` fila a fila: ~30 s; ahora ~3 s). `RETURNING` porque con inserción por lotes `rowcount` solo cuenta
+el último lote. Ciclo completo: 37 s → 10.7 s.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
