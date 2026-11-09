@@ -1,7 +1,7 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–010 y ampliar la red OSM a la zona única el mismo día.
+> y actualizado tras aplicar las migraciones 001–011 y ampliar la red OSM a la zona única el mismo día.
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
@@ -143,6 +143,12 @@ usa el índice GiST. Las columnas `in_edges`/`out_edges` de `pgr_extractVertices
 
 La escribe y la lee `src/presupuesto.py` para no exceder la cuota mensual (ver `docs/ROUTING.md` › Fuentes de tráfico).
 
+### Ruteo (migración 011)
+- `dim_velocidad_tipo_via (tipo_via PK, velocidad_kmh)` — velocidad libre por tipo de vía (12 tipos).
+- Vista `v_costos_grafo (id, source, target, cost, reverse_cost)` — costo en segundos con el tráfico del
+  último ciclo; excluye aristas inactivas, auto-lazos y cerradas.
+- Función `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` — ver `ROUTING.md`.
+
 ### `schema_migrations` — control de migraciones
 `version` (PK, `'001'`…), `nombre`, `aplicada_en`. La escribe `src/migrate.py`.
 
@@ -198,6 +204,7 @@ BD existente y sobre una BD vacía.
 | 008 | (P8) Compresión a 7 días en ambas hypertables; retención de 365 días en `trafico_calles`; chunks diarios en `trafico_calles` |
 | 009 | Tabla `consumo_api` (pool de peticiones a TomTom) |
 | 010 | Hypertable `fact_flujo_aristas` (tráfico por arista desde vector tiles) |
+| 011 | Ruteo: `dim_velocidad_tipo_via`, vista `v_costos_grafo`, función `ruta_mas_rapida()` (ver `ROUTING.md`) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 
@@ -215,4 +222,4 @@ BD existente y sobre una BD vacía.
 | P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
 | P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
 | P10 | `trafico_inferido` obsoleta | Ruido en el esquema | Eliminar tras migrar paneles de Grafana |
-| P11 | Auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original) | Inofensivos para Dijkstra, pero ruido | Filtrar en la vista de costos |
+| P11 | ✅ **Resuelto en el ruteo** — auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original); `v_costos_grafo` los excluye. Siguen en la tabla (inofensivos) | — | Migración 011 |

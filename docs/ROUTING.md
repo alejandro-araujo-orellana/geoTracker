@@ -1,8 +1,9 @@
 # Diseño: Ruteo con tráfico real (Dijkstra sobre pgRouting)
 
-> Estado: **diseño / próxima fase**. El grafo y el encaje de coordenadas a nodos ya funcionan en la BD
-> (prueba 2026-11-09: (22.1515, -100.9757) → (22.1300, -101.0050) = 54 aristas, 5 029 m, distancia
-> pura). Falta el costo basado en tráfico y la API.
+> Estado (2026-11-09): **ruteo con tráfico implementado en la BD** (migración 011, D14):
+> `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)`. Prueba real Centro Histórico → Zona
+> Universitaria UASLP: 81 aristas, 5.16 km, 9.6 min a flujo libre, 0.59 s de cálculo.
+> Falta: exponerlo en la API (`services/api`) y validar ETAs.
 
 ## Objetivo
 
@@ -26,8 +27,8 @@ JSONB (`dim_segmentos_viales.coordenadas_geometria`) queda solo como copia cruda
 ## Flujo completo
 
 ```
-TomTom ─▶ fact_lecturas_trafico ─▶ predictor (IDW) ─▶ trafico_calles (congestión por arista OSM)
-                                                              │
+TomTom tiles ─▶ fact_flujo_aristas ─┬─▶ predictor v3 ─▶ trafico_calles (congestión por arista OSM)
+                                    └─ cerradas ──────────────┐       │
                                                               ▼
                                           v_costos_grafo (costo = tiempo con tráfico)
                                                               │
@@ -67,67 +68,40 @@ de OSM o por `freeFlowSpeed` de TomTom cuando la arista esté medida):
 El grafo es dirigido: cada calle de doble sentido ya está duplicada con geometría invertida.
 Por lo tanto **`reverse_cost = -1`** y `directed => true`. Ver `DATABASE.md › dim_calles_osm`.
 
-## SQL de referencia
+## Implementación (migración 011)
 
-### Prerrequisitos
-Ya aplicados (migraciones 004–005): PK + GiST en vértices, `source/target` = nodos OSM,
-`maxspeed_kmh`, `oneway`, `activo`. Falta como migración nueva (011):
+Todo vive en `db/migrations/011_ruteo.sql`:
+
+| Objeto | Qué hace |
+|---|---|
+| `dim_velocidad_tipo_via` | Velocidad libre por tipo de vía (tabla de arriba). Ajustable con `UPDATE` |
+| `v_costos_grafo` | `id, source, target, cost (segundos), reverse_cost (-1)` con el tráfico del último ciclo (< 30 min) |
+| `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` | Encaja cada coordenada al nodo más cercano (GiST) y corre `pgr_dijkstra` sobre la vista. Devuelve `seq, osm_id, nombre, tipo_via, longitud_m, segundos, segundos_acumulados, geom` |
+
+Diferencias con el diseño original (D14):
+- **Vías cerradas excluidas** del grafo (última pasada de tiles), no solo encarecidas.
+- **`LEFT JOIN`** a `dim_velocidad_tipo_via` con 20 km/h por defecto: un `tipo_via` no listado (p. ej.
+  `living_street`) ya no hace desaparecer la arista en silencio.
+- **`maxspeed` de OSM solo si está entre 10 y 130 km/h**; si no, la velocidad del tipo de vía.
+- Sin tráfico reciente (> 30 min) la vista usa flujo libre: la ruta sigue siendo válida, sin tráfico.
+
 ```sql
-CREATE TABLE dim_velocidad_tipo_via (
-    tipo_via        text PRIMARY KEY,
-    velocidad_kmh   double precision NOT NULL
-);
+-- Ejemplo: Centro Histórico → Zona Universitaria UASLP
+SELECT * FROM ruta_mas_rapida(22.1497, -100.9739, 22.1460, -101.0130);
 ```
 
-### Vista de costos (tráfico actual)
-```sql
-CREATE OR REPLACE VIEW v_costos_grafo AS
-WITH ultimo_ciclo AS (
-    SELECT max(timestamp_calculo) AS ts
-    FROM trafico_calles
-    WHERE timestamp_calculo > now() - interval '30 minutes'
-)
-SELECT
-    c.id,
-    c.source,
-    c.target,
-    (c.longitud_m / (COALESCE(c.maxspeed_kmh, v.velocidad_kmh) / 3.6))
-        * COALESCE(t.nivel_congestion_inf, 1.0)  AS cost,
-    -1::double precision                          AS reverse_cost
-FROM dim_calles_osm c
-JOIN dim_velocidad_tipo_via v USING (tipo_via)
-LEFT JOIN trafico_calles t
-       ON t.osm_id = c.osm_id
-      AND t.timestamp_calculo = (SELECT ts FROM ultimo_ciclo)
-WHERE c.activo
-  AND c.source <> c.target;
-```
+Limitaciones del encaje: se usa el **nodo** más cercano (no un punto a mitad de calle); si ese nodo solo es
+alcanzable a contrasentido, la función devuelve vacío. Mejora futura: `pgr_withPoints`.
 
-### Encajar una coordenada al vértice más cercano
-```sql
-SELECT id
-FROM dim_calles_osm_vertices_pgr
-ORDER BY geom <-> ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
-LIMIT 1;
-```
-(Mejora futura: `pgr_withPoints` para iniciar a mitad de una arista.)
-
-### Ruta más rápida
-```sql
-SELECT r.seq, r.edge, c.nombre, c.tipo_via, c.longitud_m,
-       r.cost AS segundos, r.agg_cost AS segundos_acumulados, c.geom
-FROM pgr_dijkstra(
-       'SELECT id, source, target, cost, reverse_cost FROM v_costos_grafo',
-       :vertice_origen, :vertice_destino, directed => true) r
-JOIN dim_calles_osm c ON c.id = r.edge
-ORDER BY r.seq;
-```
+Pruebas: `tests/test_ruteo_db.py` (BD temporal con grafo sintético): ruta corta sin tráfico, desvío con
+atasco, vía cerrada excluida, tráfico viejo ignorado, sentido único respetado, `maxspeed` absurdo
+descartado, tipo de vía desconocido conservado.
 
 ## Plan de implementación
 
 1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
-2. **Migración de ruteo (011):** tabla `dim_velocidad_tipo_via` + vista `v_costos_grafo`.
-3. **Módulo `src/router.py`** (o servicio en `services/api`): `ruta_mas_rapida(origen, destino) -> Ruta` con snap + Dijkstra + suma de distancia/ETA; GeoJSON de salida.
+2. **Migración de ruteo (011):** ✅ `dim_velocidad_tipo_via`, `v_costos_grafo` y `ruta_mas_rapida()` (2026-11-09).
+3. **Capa Python / API** (`services/api`): llamar a `ruta_mas_rapida()` y devolver GeoJSON + distancia + ETA + minutos perdidos por congestión (comparando contra el costo a flujo libre).
 4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
 5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.
 6. **Futuro:** A* (`pgr_aStar`) para acelerar; costos predichos por hora del día a partir del histórico en `fact_lecturas_trafico`; penalización de giros.

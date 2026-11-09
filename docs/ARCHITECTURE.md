@@ -66,10 +66,10 @@ Graciano Sánchez.
 ## 5. Ruteo (pgRouting)
 
 * El grafo es `dim_calles_osm` (aristas, `id/source/target`, solo `activo`) + `dim_calles_osm_vertices_pgr` (nodos = IDs de nodo OSM), **dirigido**: siempre `directed => true` y `reverse_cost = -1`.
-* El costo de una arista se expresa en **segundos** (tiempo de recorrido con tráfico), nunca en metros, y se calcula en una vista SQL (`v_costos_grafo`), no en Python.
+* El costo de una arista se expresa en **segundos** (tiempo de recorrido con tráfico), nunca en metros, y se calcula en una vista SQL (`v_costos_grafo`), no en Python. Las vías cerradas se **excluyen**, no se encarecen. Toda ruta se obtiene con `ruta_mas_rapida()` (D14). ✅
 * La red y la topología se regeneran juntas con `scripts/osmnx_loader.py`, que valida al final con `pgr_connectedComponents` y aristas sin vértice (hoy: 1 componente, 28 008 vértices, 0 huérfanas).
 * Detalle completo en [`ROUTING.md`](ROUTING.md).
 
 ## 6. Pruebas
 
-* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (131 tests en verde al 2026-11-09). La lógica que vive en SQL (asociación espacial) se prueba contra PostgreSQL real (`tests/test_asociador_db.py`, BD temporal).
+* Tests en `tests/` con `pytest`, ejecutados con `PYTHONPATH=src`. Toda regla de transformación o carga debe tener test. ✅ (138 tests en verde al 2026-11-09). La lógica que vive en SQL (asociación espacial) se prueba contra PostgreSQL real (`tests/test_asociador_db.py`, BD temporal).

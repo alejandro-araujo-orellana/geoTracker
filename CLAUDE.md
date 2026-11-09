@@ -81,7 +81,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | 0. Esquema | `src/migrate.py` + `db/migrations/` | Al arrancar | Tablas, índices, hypertables |
 | 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`) | Cada varios meses | `dim_calles_osm` (67 464 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (28 008 nodos) |
 | 4. ETL + inferencia | `src/main.py` | Cada 15 min | `fact_lecturas_trafico`, `trafico_calles` |
-| 5. Ruteo | `src/router.py` / `services/api` | Bajo demanda | **Pendiente** — ver `docs/ROUTING.md` |
+| 5. Ruteo | `ruta_mas_rapida()` en la BD (migración 011); API pendiente | Bajo demanda | Ruta más rápida con tráfico actual — ver `docs/ROUTING.md` |
 
 ### Ciclo del daemon (`src/main.py`)
 
@@ -123,7 +123,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 - Sin inserts fila a fila; inserciones por lotes e idempotentes (`ON CONFLICT`).
 - E/S de red del ETL asíncrona (`aiohttp`); `requests` solo en `scripts/`.
 - Geometría en PostGIS con SRID explícito (4326 / 32614); nunca en tablas de hechos. JSONB es legado.
-- Grafo dirigido: `pgr_dijkstra(..., directed => true)` con `reverse_cost = -1`; costo en segundos; solo aristas `activo`.
+- Grafo dirigido: `pgr_dijkstra(..., directed => true)` con `reverse_cost = -1`; costo en segundos; solo aristas `activo`. Usa siempre `v_costos_grafo` / `ruta_mas_rapida()`: ya excluyen cerradas y auto-lazos.
 - Con listas de osmnx (`highway`, `name`…) nunca tomes "el primero": su orden cambia con `PYTHONHASHSEED`. Usa `scripts/osm_utils.py`.
 - Todo cambio de esquema va en `db/migrations/` y se refleja en `docs/DATABASE.md`.
 - Dependencias con versión exacta.
@@ -131,6 +131,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 ## Estado actual y prioridades
 
 1. Reestructuración a vector tiles (D8–D13) completa: ingesta (`fact_flujo_aristas`) y predictor v3. ETL listo para encenderse (ciclo ~11 s). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
-2. Saneamiento de esquema: P1–P9 resueltos (2026-11-09). Pendientes: P10–P11 (ver `docs/DATABASE.md`).
+2. Saneamiento de esquema: P1–P9 y P11 resueltos (2026-11-09). Pendiente: P10 (`trafico_inferido` legado).
+3. Ruteo: `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` ya funciona en la BD (D14). Falta exponerlo en `services/api`.
 3. Infra: arreglar `Dockerfile` del ETL (doble `FROM`), credenciales del compose a `.env`.
 4. Ruteo: vista `v_costos_grafo`, `router.py`, endpoint en `services/api` (hoy `app/api` y `app/core` están vacíos).

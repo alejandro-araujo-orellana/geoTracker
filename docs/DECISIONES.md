@@ -101,6 +101,20 @@ y 61 vías cerradas; ningún nivel 0 sin marca de cierre (no hay "sin dato" disf
 `text()` fila a fila: ~30 s; ahora ~3 s). `RETURNING` porque con inserción por lotes `rowcount` solo cuenta
 el último lote. Ciclo completo: 37 s → 10.7 s.
 
+## D14 — Ruteo en la base de datos: vista de costos + función `ruta_mas_rapida` (2026-11-09)
+**Decisión:** la lógica de ruteo vive en PostgreSQL (migración 011): `v_costos_grafo` calcula el costo en
+segundos con el tráfico del último ciclo y `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` encaja y corre
+`pgr_dijkstra`. La API solo llamará a la función.
+**Por qué:** pgRouting necesita el grafo como SQL de todos modos; tenerlo en una función la hace usable
+desde Grafana, psql o la API sin duplicar lógica, y probable contra PostgreSQL real.
+**Ajustes al diseño de `ROUTING.md`:**
+- Vías cerradas **excluidas** (no solo con costo alto): con costo alto Dijkstra las usaría si no hay otra.
+- `LEFT JOIN` a velocidades con 20 km/h por defecto: con `JOIN` una arista de tipo no listado desaparecía
+  del grafo en silencio y podía dejar zonas inalcanzables.
+- `maxspeed` de OSM solo entre 10 y 130 km/h (los datos de OSM traen valores absurdos ocasionales).
+**Verificado:** 7 tests de integración con grafo sintético; ruta real Centro → UASLP 5.16 km / 9.6 min en
+0.59 s sobre 67 312 aristas.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
