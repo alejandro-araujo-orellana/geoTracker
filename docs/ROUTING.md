@@ -4,7 +4,10 @@
 > `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)`. Prueba real Centro Histórico → Zona
 > Universitaria UASLP con el tráfico de las 21:21 UTC (15:21 local): 79 aristas, 5.03 km, **10.4 min**;
 > la misma ruta a flujo libre serían 7.6 min (~2.8 min perdidos por congestión); 0.59 s de cálculo.
-> Falta: exponerlo en la API (`services/api`) y validar ETAs.
+> Expuesto en la API (D16): `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon[&detalle=true]` → distancia,
+> duración con tráfico y a flujo libre, demora, vigencia del tráfico, calles y GeoJSON. En vivo (19:32 local,
+> hora pico): Centro → UASLP 5.65 km, 8.3 min (7.6 a flujo libre), respuesta en 0.29 s.
+> Falta: validar ETAs con varios días de datos y calibrar velocidades libres.
 
 ## Objetivo
 
@@ -102,7 +105,7 @@ descartado, tipo de vía desconocido conservado.
 
 1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
 2. **Migración de ruteo (011):** ✅ `dim_velocidad_tipo_via`, `v_costos_grafo` y `ruta_mas_rapida()` (2026-11-09).
-3. **Capa Python / API** (`services/api`): llamar a `ruta_mas_rapida()` y devolver GeoJSON + distancia + ETA + minutos perdidos por congestión (comparando contra el costo a flujo libre).
+3. **API** (`services/api`): ✅ `GET /api/v1/rutas` (D16). El tiempo a flujo libre sale de `v_tiempo_libre` (migración 012), la misma vista que usa `v_costos_grafo`.
 4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
 5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.
 6. **Futuro:** A* (`pgr_aStar`) para acelerar; costos predichos por hora del día a partir del histórico en `fact_lecturas_trafico`; penalización de giros.

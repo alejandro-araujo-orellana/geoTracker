@@ -23,26 +23,30 @@ Graciano Sánchez.
 ## 1. Infraestructura y despliegue (Docker)
 
 * **Paridad de entornos:** desarrollo y producción usan exclusivamente Docker Compose. No se instalan dependencias globales en el anfitrión. ✅
-* **Servicios oficiales** (`docker-compose.yml`, red `red_trafico`):
+* **Servicios oficiales** (`docker-compose.yml`, Compose v2+, red `red_trafico`, todos con `restart: unless-stopped` — D17):
 
   | Servicio | Contenedor | Imagen / build | Puerto |
   |---|---|---|---|
-  | `timescaledb` | `trafico_db` | `db/Dockerfile` → `timescale/timescaledb-ha:pg15-latest` + `postgresql-15-pgrouting` | 5432 |
-  | `etl_worker` | `etl_trafico` | `Dockerfile` raíz (Python) | — |
-  | `grafana` | `grafana_bi` | `grafana/grafana-oss:latest` | 3000 |
-  | `api` (pendiente) | — | `services/api/Dockerfile` (FastAPI) | 8000 |
+  | `timescaledb` | `trafico_db` | `geotracker-timescaledb:pg15.2-ts2.10.2` (`db/Dockerfile`, base fijada por digest + pgRouting 4.0.1) | 5432 |
+  | `etl_worker` | `etl_trafico` | `Dockerfile` raíz (Python 3.11) | — |
+  | `api` | `geotracker_api` | `services/api/Dockerfile` (FastAPI, Python 3.12) | 8000 |
+  | `grafana` | `grafana_bi` | `grafana/grafana-oss:13.0.2` | 3000 |
+
+* **Imágenes con versión fija:** ninguna imagen usa `latest`. La BD **no se reconstruye ni actualiza** como efecto
+  secundario: cambiar PostgreSQL/TimescaleDB/PostGIS/pgRouting es una migración planeada (respaldo + prueba). ✅ (D17)
+* **Contenedores inmutables:** ningún servicio monta el código del repo; corre lo construido en su imagen. ✅ (D17)
 
 * **Motor de base de datos:** PostgreSQL 15 con **TimescaleDB + PostGIS + pgRouting**. No se cambia de imagen sin actualizar `DATABASE.md`. ✅
 * **Esquema versionado:** todo DDL (tablas, columnas, índices, hypertables, vistas) vive en `db/migrations/NNN_nombre.sql`, es idempotente y se aplica con `src/migrate.py` (automático al arrancar `main.py`). Una migración aplicada nunca se edita: se agrega otra. Nunca se modifica el esquema solo a mano. ✅
 * **Hypertables:** toda tabla de histórico (`fact_lecturas_trafico`, `trafico_calles`) se convierte en hypertable antes de recibir datos y debe tener política de compresión/retención. Los datos crudos (`fact_lecturas_trafico`) nunca expiran; los derivados sí. Ningún proceso escribe en chunks de más de 7 días (pueden estar comprimidos). ✅
-* **Variables de entorno:** ninguna credencial (BD, Grafana, TomTom) en código ni en `docker-compose.yml`; todo viene de `.env` (en `.gitignore`) vía `${VAR}`. Nombres canónicos: `TOMTOM_API_KEY`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GF_ADMIN_USER`, `GF_ADMIN_PASSWORD`. ⚠️ el compose tiene contraseñas literales y usa `DB_PASS`.
+* **Variables de entorno:** ninguna credencial (BD, Grafana, TomTom) en código ni en `docker-compose.yml`; todo viene de `.env` (en `.gitignore`) vía `${VAR}`. Nombres canónicos: `TOMTOM_API_KEY`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GF_ADMIN_USER`, `GF_ADMIN_PASSWORD`. ✅ (D17)
 * **Dockerfile del ETL:** una sola etapa basada en `python:3.11.15-slim-trixie` + dependencias de GDAL/libpq; debe construirse sin errores (`docker build .`). ✅ (D10)
 
 ## 2. Estándares de código (Python)
 
 * **Arquitectura modular:** responsabilidad única por módulo: `config`, `extractor_tiles` + `asociador` (fuente principal), `extractor` + `transformer` + `loader` (fuente secundaria), `presupuesto`, `predictor` y (próximo) `router`. Los scripts de preparación viven en `scripts/`. ✅
 * **E/S de red asíncrona en el ETL:** `aiohttp` + `asyncio`. `requests` solo se permite en scripts de preparación one-shot (`scripts/`). ✅
-* **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ✅ en el ETL (D10). ⚠️ `services/api/requirements.txt` aún usa `>=`.
+* **Dependencias fijadas:** versión exacta (`==`) en `requirements.txt` y `services/api/requirements.txt`. ✅ en el ETL (D10) y en la API (D16).
 * **Logging:** prohibido `print()` fuera de bloques `if __name__ == "__main__"` de prueba. Usar `logging` con nivel y timestamp; configurar `basicConfig` **solo** en los puntos de entrada (`main.py`, scripts), no en módulos. ⚠️ `config.py:38`; `basicConfig` repetido en loader/transformer/predictor.
 * **Configuración centralizada:** constantes compartidas se definen una sola vez: la zona de estudio en `src/zona.py` (un test impide definir otro `BBOX`), el resto (SRID, intervalos, horas pico) en `src/config.py`. ✅
 

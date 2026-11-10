@@ -1,13 +1,16 @@
 # Esquema de Base de Datos — geoTracker
 
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–011 y ampliar la red OSM a la zona única el mismo día.
+> y actualizado tras aplicar las migraciones 001–012 y ampliar la red OSM a la zona única el mismo día.
+> Motor: imagen fija `geotracker-timescaledb:pg15.2-ts2.10.2` (D17).
 > El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
 > este archivo en el mismo commit.
 
 ## Motor y extensiones
 
-Imagen: `timescale/timescaledb-ha:pg15-latest` + paquete `postgresql-15-pgrouting` (ver `db/Dockerfile`).
+Imagen: `geotracker-timescaledb:pg15.2-ts2.10.2` = `timescale/timescaledb-ha` fijada por digest (la `pg15-latest`
+de 2023, PostgreSQL 15.2) + `postgresql-15-pgrouting=4.0.1` (ver `db/Dockerfile`, D17). No usar `pg15-latest`:
+hoy trae una TimescaleDB que no carga estos datos sin actualizar la extensión.
 
 | Extensión | Versión | Uso |
 |---|---|---|
@@ -145,8 +148,9 @@ La escribe y la lee `src/presupuesto.py` para no exceder la cuota mensual (ver `
 
 ### Ruteo (migración 011)
 - `dim_velocidad_tipo_via (tipo_via PK, velocidad_kmh)` — velocidad libre por tipo de vía (12 tipos).
-- Vista `v_costos_grafo (id, source, target, cost, reverse_cost)` — costo en segundos con el tráfico del
-  último ciclo; excluye aristas inactivas, auto-lazos y cerradas.
+- Vista `v_tiempo_libre (osm_id, id, segundos_libre)` — tiempo a flujo libre de cada arista (migración 012).
+- Vista `v_costos_grafo (id, source, target, cost, reverse_cost)` — `segundos_libre × congestión` del último
+  ciclo; excluye aristas inactivas, auto-lazos y cerradas.
 - Función `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` — ver `ROUTING.md`.
 
 ### `schema_migrations` — control de migraciones
@@ -205,6 +209,7 @@ BD existente y sobre una BD vacía.
 | 009 | Tabla `consumo_api` (pool de peticiones a TomTom) |
 | 010 | Hypertable `fact_flujo_aristas` (tráfico por arista desde vector tiles) |
 | 011 | Ruteo: `dim_velocidad_tipo_via`, vista `v_costos_grafo`, función `ruta_mas_rapida()` (ver `ROUTING.md`) |
+| 012 | Vista `v_tiempo_libre` (segundos a flujo libre por arista); `v_costos_grafo` pasa a usarla (D16) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
 

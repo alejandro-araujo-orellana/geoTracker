@@ -20,22 +20,37 @@ Documentación:
 
 ### Docker
 ```bash
-docker compose up -d --build --no-deps etl_worker   # (re)levantar SOLO el ETL — ver abajo
-docker compose up -d timescaledb       # solo la BD (desarrollo / tests)
-docker logs -f etl_trafico             # logs del ETL
+docker compose up -d --build etl_worker api   # reconstruir y levantar ETL + API (la BD y Grafana NO se reconstruyen)
+docker compose up -d --wait                   # levantar todo y esperar los healthchecks
+docker compose ps                             # estado
+docker logs -f etl_trafico                    # logs del ETL
 docker exec -it trafico_db psql -U user -d vialidades_slp   # consola SQL
 ```
-Grafana: http://localhost:3000
+Servicios (Compose v5, `restart: unless-stopped`, credenciales en `.env` — D17):
 
-⚠️ `trafico_db` y `grafana_bi` fueron creados con Compose 1.29; Compose v5 espera otro nombre de imagen y
-**recrearía la BD** con `docker compose up` sin `--no-deps` (D15). Hasta migrarlos, levanta servicios uno a
-uno con `--no-deps`.
+| Servicio | Contenedor | URL |
+|---|---|---|
+| BD | `trafico_db` | `localhost:5432` |
+| ETL | `etl_trafico` | — (ciclo cada 15 min) |
+| API | `geotracker_api` | http://localhost:8000/docs |
+| Grafana | `grafana_bi` | http://localhost:3000 |
+
+⚠️ La imagen de la BD está fijada (PostgreSQL 15.2 / TimescaleDB 2.10.2 / pgRouting 4.0.1). **No** uses
+`docker compose build timescaledb` ni cambies `db/Dockerfile` sin planear la actualización de extensiones (D17).
+
+### API
+```bash
+curl 'localhost:8000/api/v1/rutas?origen=22.1497,-100.9739&destino=22.1460,-101.0130'   # &detalle=true
+```
+Respuesta: distancia, duración con tráfico y a flujo libre, demora, vigencia del tráfico, calles en orden y
+geometría GeoJSON. 422 si la coordenada está a > 300 m de la red o el formato es inválido; 404 si no hay ruta.
 
 ### Tests
 Los tests importan módulos por nombre simple; `PYTHONPATH` debe apuntar a `src/`:
 ```bash
 PYTHONPATH=src pytest tests/
 PYTHONPATH=src pytest tests/test_transformer.py::TestTransform::test_registro_valido_produce_dos_paquetes
+PYTHONPATH=src:services/api pytest services/api/tests     # API (en la imagen geotracker-api)
 ```
 
 ### Esquema de base de datos (migraciones)
@@ -85,7 +100,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 | 0. Esquema | `src/migrate.py` + `db/migrations/` | Al arrancar | Tablas, índices, hypertables |
 | 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`) | Cada varios meses | `dim_calles_osm` (67 464 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (28 008 nodos) |
 | 4. ETL + inferencia | `src/main.py` | Cada 15 min | `fact_lecturas_trafico`, `trafico_calles` |
-| 5. Ruteo | `ruta_mas_rapida()` en la BD (migración 011); API pendiente | Bajo demanda | Ruta más rápida con tráfico actual — ver `docs/ROUTING.md` |
+| 5. Ruteo | `ruta_mas_rapida()` en la BD (011–012) + `GET /api/v1/rutas` (`services/api`) | Bajo demanda | Ruta más rápida con tráfico actual — ver `docs/ROUTING.md` |
 
 ### Ciclo del daemon (`src/main.py`)
 
@@ -135,6 +150,6 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 ## Estado actual y prioridades
 
 1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
-2. Ruteo: `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` funciona en la BD (D14). Falta exponerlo en `services/api` (hoy `app/api` y `app/core` están vacíos) y validar ETAs.
-3. Infra: migrar contenedores a Compose v5 con respaldo previo y `restart: unless-stopped` en el ETL (D15); credenciales del compose a `.env` (el compose define `DB_PASS`, `config.py` lee `DB_PASSWORD`).
+2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
+3. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes.
 4. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).

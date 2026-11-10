@@ -125,6 +125,36 @@ de datos persistiría, pero no hay razón para arriesgarlo. Pendiente: migrar lo
 una ventana controlada (respaldo previo) y declarar `restart: unless-stopped` en el ETL, para que un reinicio
 de Docker no detenga la acumulación de datos.
 
+## D16 — API de rutas delgada sobre la BD (2026-11-09)
+**Decisión:** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon[&detalle=true]` (FastAPI, `services/api`). La API
+solo valida, llama a `ruta_mas_rapida()` y da formato: distancia, duración con tráfico, duración a flujo libre de la
+misma ruta, demora por tráfico, vigencia del tráfico, calles en orden y geometría GeoJSON.
+**Por qué así:**
+- El tiempo a flujo libre se extrajo a la vista `v_tiempo_libre` (migración 012) y `v_costos_grafo` la usa: una sola
+  fórmula de velocidad para el ruteo y para la API.
+- Cobertura por distancia a la red (> 300 m del nodo más cercano → 422), no por bbox: no duplica `zona.py` en otro
+  servicio y refleja la red realmente cargada.
+- Errores explícitos: 422 (formato, fuera de cobertura, origen = destino), 404 (sin ruta, p. ej. contrasentido).
+- Usa la carpeta `app/rutas/` que ya existía en el esqueleto; `app/api/v1` solo agrupa routers.
+**Verificado:** 12 tests contra PostgreSQL real (BD temporal); en vivo, Centro → UASLP en 0.29 s.
+
+## D17 — Contenedores en Compose v5, imágenes fijas y `restart` (2026-11-09)
+**Decisión:**
+- `docker-compose.yml` para Compose v2+ (`name: geotracker`, sin `version`), credenciales solo desde `.env`,
+  `restart: unless-stopped` en los 4 servicios, healthcheck de la BD y `depends_on: service_healthy`.
+- **Imágenes fijas:** BD `geotracker-timescaledb:pg15.2-ts2.10.2` (la imagen existente, re-etiquetada) con
+  `db/Dockerfile` anclado por digest a la base de 2023 y pgRouting `4.0.1`; Grafana `13.0.2` (la local).
+- El ETL ya no monta el repo (`.:/app`): corre el código de su imagen.
+**Por qué:**
+- `pg15-latest` hoy trae versiones de TimescaleDB que no cargan una BD con la extensión 2.10.2 sin
+  `ALTER EXTENSION ... UPDATE`; reconstruir la BD "por accidente" podía dejarla sin arrancar. Actualizar
+  PostgreSQL/TimescaleDB/pgRouting queda como migración propia (respaldo + prueba).
+- `restart` evita que un reinicio de Docker/WSL detenga la acumulación de datos.
+- Sin el bind mount, lo que corre es exactamente lo construido (requisito para Kubernetes en el siguiente milestone).
+**Migración ejecutada:** respaldo previo (`vialidades_slp_20261109_193205_pre_compose_v5.dump`); mismos volúmenes
+(`geotracker_datos_postgres`, `geotracker_grafana_data`); extensiones idénticas; ningún conteo disminuyó (el ETL nuevo
+sumó su primer ciclo). Reemplaza la restricción de D15: ya se puede usar `docker compose up -d` normal.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
