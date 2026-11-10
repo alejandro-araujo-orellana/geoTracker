@@ -6,4 +6,5 @@ __pycache__/
 .mypy_cache/
 *.egg-info/
 dist/
-CLAUDE.md
+# Caché HTTP de osmnx (respuestas de Overpass); se regenera sola
+cache/

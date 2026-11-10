@@ -23,6 +23,26 @@ def _calcular_nivel_congestion(current_travel_time, free_flow_travel_time) -> fl
     return current_travel_time / free_flow_travel_time
 
 
+def coordenadas_a_wkt(coordenadas: list) -> str | None:
+    """
+    Convierte [{'latitude': .., 'longitude': ..}, ...] (formato TomTom) en un
+    LINESTRING WKT con orden lon/lat (EPSG:4326).
+    Devuelve None si hay menos de 2 puntos válidos: no se puede formar una línea.
+    """
+    puntos = []
+    for punto in coordenadas or []:
+        if not isinstance(punto, dict):
+            continue
+        lat, lon = punto.get("latitude"), punto.get("longitude")
+        if lat is None or lon is None:
+            continue
+        puntos.append(f"{float(lon)!r} {float(lat)!r}")
+
+    if len(puntos) < 2:
+        return None
+    return f"LINESTRING({', '.join(puntos)})"
+
+
 def transform(respuestas_crudas: list) -> tuple[list, list]:
     """
     Transforma la lista de respuestas crudas de extractor.py en dos paquetes
@@ -33,7 +53,7 @@ def transform(respuestas_crudas: list) -> tuple[list, list]:
 
     Returns:
         (lista_datos_estaticos, lista_datos_dinamicos)
-        - lista_datos_estaticos: tuplas para dim_segmentos_viales.
+        - lista_datos_estaticos: tuplas (id, nombre, coordenadas, wkt) para dim_segmentos_viales.
         - lista_datos_dinamicos: tuplas para fact_lecturas_trafico.
     """
     lista_datos_estaticos: list[tuple] = []
@@ -68,13 +88,13 @@ def transform(respuestas_crudas: list) -> tuple[list, list]:
         # Timestamp UTC en formato ISO 8601 compatible con TIMESTAMPTZ de Postgres
         timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00")
 
-        # Extracción de geometría para JSONB — nunca va a fact_lecturas_trafico (ARCHITECTURE.md §4)
+        # Geometría: nunca va a fact_lecturas_trafico (ARCHITECTURE.md §4).
+        # Se guarda la lista cruda (JSONB legado) y su WKT para la columna PostGIS geom.
         coordenadas_raw = flow_data.get("coordinates", {}).get("coordinate", [])
-        #geometria_json_string = json.dumps(coordenadas_raw)
+        geometria_wkt = coordenadas_a_wkt(coordenadas_raw)
 
         # Tupla para dim_segmentos_viales
-        paquete_estatico = (id_calle, id_calle, coordenadas_raw) 
-	#geometria_json_string)
+        paquete_estatico = (id_calle, id_calle, coordenadas_raw, geometria_wkt)
 
         # Tupla para fact_lecturas_trafico
         paquete_dinamico = (timestamp_utc, id_calle, current_speed, current_travel_time, nivel_congestion)

@@ -1,42 +1,80 @@
-version: '3.8'
+# geoTracker — Docker Compose v2+ (probado con v5.1). Ver docs/DECISIONES.md D17.
+# Credenciales: todas desde .env (DB_USER, DB_PASSWORD, DB_NAME, TOMTOM_API_KEY,
+# GF_ADMIN_USER, GF_ADMIN_PASSWORD). Nada sensible en este archivo.
+# Imágenes con versión fija: reconstruir o actualizar la BD/Grafana es una decisión
+# explícita, no un efecto secundario de `docker compose up`.
+
+name: geotracker
 
 services:
   timescaledb:
-    image: timescale/timescaledb-ha:pg15-latest
+    # Imagen fija: PostgreSQL 15.2 + TimescaleDB 2.10.2 + PostGIS 3.3.2 + pgRouting 4.0.1.
+    # `pg15-latest` hoy traería versiones incompatibles con los datos (D17).
+    image: geotracker-timescaledb:pg15.2-ts2.10.2
+    build:
+      context: ./db
     container_name: trafico_db
-#    restart: always
+    restart: unless-stopped
     environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=dev_password_seguro
-      - POSTGRES_DB=vialidades_slp
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     ports:
       - "5432:5432"
     volumes:
       - datos_postgres:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - red_trafico
 
   etl_worker:
     build: .
     container_name: etl_trafico
+    restart: unless-stopped
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
+    env_file: .env
     environment:
-      - DB_USER=user
-      - DB_PASS=dev_password_seguro
-      - DB_HOST=timescaledb
-      - DB_NAME=vialidades_slp
-      - TOMTOM_API_KEY=${TOMTOM_API_KEY}
-    volumes:
-      - .:/app
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+    # Sin montar el código: el contenedor corre la versión construida en la imagen (D17).
+    networks:
+      - red_trafico
+
+  api:
+    build: ./services/api
+    container_name: geotracker_api
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - red_trafico
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:13.0.2
     container_name: grafana_bi
+    restart: unless-stopped
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     dns:
       - 8.8.8.8
     ports:
@@ -44,8 +82,9 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Solo aplica al crear la BD interna de Grafana; después se cambia desde la UI.
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
     networks:
       - red_trafico
 
@@ -55,6 +94,4 @@ networks:
 
 volumes:
   datos_postgres:
-    driver: local
   grafana_data:
-    driver: local

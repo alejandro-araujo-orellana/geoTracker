@@ -18,6 +18,7 @@ def descargar_topologia(bbox: str) -> dict | None:
       way["highway"="primary"]({bbox});
       way["highway"="trunk"]({bbox});
       way["highway"="secondary"]({bbox});
+      way["highway"="tertiary"]({bbox});
     );
     out geom;
     """
