@@ -15,6 +15,7 @@ Documentación:
 - `docs/ROUTING.md` — diseño del ruteo con tráfico.
 - `docs/DECISIONES.md` — registro de decisiones (qué y por qué). **Agrega una entrada por cada decisión
   de diseño** y cítala en el commit.
+- `docs/KUBERNETES.md` — análisis y plan del milestone de Kubernetes (aún no implementado).
 
 ## Comandos
 
@@ -151,5 +152,5 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
-3. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes.
+3. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
 4. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).

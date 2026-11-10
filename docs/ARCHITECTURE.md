@@ -6,6 +6,7 @@ vial de San Luis Potosí. Documentos relacionados:
 - [`DATABASE.md`](DATABASE.md) — esquema real de la BD y deuda técnica (P1–P11).
 - [`ROUTING.md`](ROUTING.md) — diseño del ruteo con Dijkstra + tráfico.
 - [`DECISIONES.md`](DECISIONES.md) — registro de decisiones: qué se cambió y por qué.
+- [`KUBERNETES.md`](KUBERNETES.md) — análisis y plan del siguiente milestone (despliegue en Kubernetes).
 - [`CLAUDE.md`](../CLAUDE.md) — guía operativa (comandos, módulos).
 
 Cada regla está marcada con su estado: ✅ se cumple · ⚠️ incumplimiento conocido (con referencia).
