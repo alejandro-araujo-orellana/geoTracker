@@ -1,6 +1,8 @@
-import time
+import argparse
 import asyncio
 import logging
+import sys
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -137,17 +139,50 @@ def ciclo_etl(engine):
     logger.info("==== Predictor Completado ===")
 
 
-if __name__ == "__main__":
-    logger.info("Iniciando Orquestador Daemon de Tráfico...")
+def ejecutar_una_vez(engine) -> int:
+    """
+    Un solo ciclo y termina (CronJob de Kubernetes, D24). Código de salida 0 si el ciclo
+    terminó, 1 si lanzó una excepción, para que el Job quede como fallido con su log.
+    No aplica migraciones: en Kubernetes las aplica el Job geotracker-migrate, una sola
+    vez, antes de la app; repetirlas cada 15 min desde el CronJob solo abriría carreras.
+    """
+    try:
+        ciclo_etl(engine)
+    except Exception:
+        logger.exception("El ciclo ETL falló.")
+        return 1
+    return 0
 
-    # Preparamos el motor de BD y llevamos el esquema a la última migración
-    engine_postgres = create_engine(config.DB_URL)
-    migrate.aplicar_migraciones(engine_postgres)
 
-    INTERVALO_SEGUNDOS = config.INTERVALO_MINUTOS * 60
-
-    # Bucle infinito (El corazón del contenedor)
+def ejecutar_daemon(engine) -> None:
+    """Modo Compose: aplica migraciones y repite el ciclo cada INTERVALO_MINUTOS."""
+    migrate.aplicar_migraciones(engine)
+    intervalo_segundos = config.INTERVALO_MINUTOS * 60
     while True:
-        ciclo_etl(engine_postgres)
+        ciclo_etl(engine)
         logger.info("Durmiendo por %d minutos hasta el siguiente ciclo...", config.INTERVALO_MINUTOS)
-        time.sleep(INTERVALO_SEGUNDOS)
+        time.sleep(intervalo_segundos)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="ETL de tráfico de geoTracker.")
+    parser.add_argument(
+        "--una-vez", action="store_true",
+        help="Ejecuta un solo ciclo y termina (para el CronJob). Sin esto, corre como daemon.",
+    )
+    args = parser.parse_args(argv)
+
+    engine = create_engine(config.DB_URL)
+    try:
+        if args.una_vez:
+            logger.info("Modo un ciclo (--una-vez).")
+            return ejecutar_una_vez(engine)
+        logger.info("Iniciando Orquestador Daemon de Tráfico...")
+        ejecutar_daemon(engine)
+        return 0
+    finally:
+        engine.dispose()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

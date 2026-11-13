@@ -222,6 +222,28 @@ el que se use en AKS), a diferencia de las anotaciones de autenticación de cada
 implementa en la fase 2, con el token como clave nueva del `Secret`.
 **Dónde:** `08-ingress.yaml` en el commit `8461992`; `docs/KUBERNETES.md` › Fase 2.
 
+## D24 — ETL en modo un ciclo (`--una-vez`) para el CronJob (2026-11-12)
+**Decisión:** `python src/main.py --una-vez` ejecuta un `ciclo_etl` y termina; sin la bandera sigue el daemon de
+Compose (migraciones al arrancar + ciclo cada 15 min), sin cambios.
+**Detalles:**
+- `--una-vez` **no aplica migraciones**: en Kubernetes las aplica una sola vez el `Job` `geotracker-migrate`;
+  hacerlo cada 15 min desde el CronJob solo abriría carreras de DDL.
+- Exit 1 si el ciclo lanza una excepción (el Job queda fallido, con su log); exit 0 en lo demás, incluido
+  "sin datos" por falta de cuota y una pasada de tiles fallida que el ciclo ya absorbe (D12). Un fallo total de
+  TomTom se detecta por métricas (fase 3), no por el exit code.
+- `main(argv)` es testeable: 3 tests nuevos en `tests/test_main.py`.
+
+## D25 — Volumen de la BD en Kubernetes: montar el padre de PGDATA + `fsGroup` (2026-11-12)
+**Decisión:** el PVC se monta en `/home/postgres/pgdata` y `PGDATA=/home/postgres/pgdata/data` (la misma ruta de
+datos que Compose y que la imagen). El pod corre como `1000:1000` con `fsGroup: 1000` y
+`fsGroupChangePolicy: OnRootMismatch`.
+**Por qué:** montar el PVC directamente en `PGDATA` (como Compose) **falla**: un PVC llega con dueño root y `initdb`
+no puede hacer `chmod 0700` ("could not change permissions ... Operation not permitted"). Compose no tiene el
+problema porque un volumen nombrado de Docker copia el dueño del directorio de la imagen. Probado con la imagen
+fijada sobre un directorio root:0777 (como `local-path` de k3d): montaje en `PGDATA` → falla; montaje en el padre →
+arranca. En Azure Disk el disco llega root:0755 con `lost+found`, así que además hace falta `fsGroup` para que
+`postgres` pueda crear `data/`. `local-path` ignora `fsGroup` (es hostPath), pero su 0777 basta.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

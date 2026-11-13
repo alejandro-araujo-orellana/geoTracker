@@ -108,3 +108,47 @@ def test_ciclo_registra_consumo_aunque_la_extraccion_falle():
     registrar.assert_called_once()
     _, fecha, usadas, bloqueado = registrar.call_args.args
     assert isinstance(fecha, date) and usadas == 0 and bloqueado is False
+
+
+# ---------------------------------------------------------------------------
+# Punto de entrada: --una-vez (CronJob, D24) vs daemon (Compose)
+# ---------------------------------------------------------------------------
+def _main(argv, ciclo=None):
+    with patch.object(main, "create_engine") as crear, \
+         patch.object(main, "ciclo_etl", side_effect=ciclo) as ciclo_etl, \
+         patch.object(main.migrate, "aplicar_migraciones") as migrar:
+        codigo = main.main(argv)
+    return codigo, ciclo_etl, migrar, crear.return_value
+
+
+def test_una_vez_corre_un_ciclo_sin_migrar_y_sale_con_0():
+    codigo, ciclo_etl, migrar, engine = _main(["--una-vez"])
+    assert codigo == 0
+    ciclo_etl.assert_called_once_with(engine)
+    migrar.assert_not_called()
+    engine.dispose.assert_called_once()
+
+
+def test_una_vez_sale_con_1_si_el_ciclo_falla():
+    codigo, ciclo_etl, _, engine = _main(["--una-vez"], ciclo=RuntimeError("BD caída"))
+    assert codigo == 1
+    ciclo_etl.assert_called_once()
+    engine.dispose.assert_called_once()
+
+
+class _Corte(Exception):
+    """Rompe el while True del daemon en el test."""
+
+
+def test_daemon_migra_y_repite_el_ciclo():
+    with patch.object(main, "create_engine") as crear, \
+         patch.object(main, "ciclo_etl") as ciclo_etl, \
+         patch.object(main.migrate, "aplicar_migraciones") as migrar, \
+         patch.object(main.time, "sleep", side_effect=[None, _Corte()]):
+        try:
+            main.main([])
+        except _Corte:
+            pass
+    migrar.assert_called_once_with(crear.return_value)
+    assert ciclo_etl.call_count == 2
+    crear.return_value.dispose.assert_called_once()

@@ -4,8 +4,8 @@
 > conserva abajo como fundamento. Las decisiones que estaban **abiertas** ya se tomaron en esta sesión y se
 > reflejan aquí y en `docs/DECISIONES.md` (D19–D23). Los manifiestos `base` + `overlays/local` ya existen:
 > renderizan con `kubectl kustomize` y pasan `kubectl apply -k --dry-run=client --validate=strict` contra el
-> cluster k3d (13 objetos, 2026-11-12). **Aún no se han aplicado**: el `CronJob` del ETL requiere el modo
-> `--una-vez` (cambio de código 1, pendiente). `overlays/nube` no existe todavía (fase 2).
+> cluster k3d (13 objetos, 2026-11-12). **Aún no se han aplicado.** El modo `--una-vez` ya existe (D24); antes de
+> aplicar hay que reconstruir `geotracker-etl:latest` e importarla a k3d. `overlays/nube` no existe todavía (fase 2).
 
 ## Objetivo
 
@@ -153,7 +153,8 @@ Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos (D5/P8)
 ## Cambios de código previstos (antes o durante el milestone)
 
 1. **Modo "un ciclo" en el ETL**: `python src/main.py --una-vez` (ejecuta `ciclo_etl` y termina, exit != 0 si
-   falla) para el `CronJob`. El modo daemon se queda para Compose. — **requerido por `06-etl-cronjob.yaml`**
+   falla) para el `CronJob`. El modo daemon se queda para Compose. — **hecho (D24)**: `--una-vez` no aplica
+   migraciones (las aplica el `Job`); exit 1 solo si el ciclo lanza una excepción.
 2. **Migraciones como comando aparte** (`python src/migrate.py`), fuera del arranque del ETL. — **requerido por
    `07-migrations-job.yaml`**
 3. **Grafana como código**: datasource y dashboards en provisioning versionado. — fase 3

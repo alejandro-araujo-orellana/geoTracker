@@ -32,6 +32,17 @@ spec:
       labels:
         app: geotracker-db
     spec:
+      # The image runs as postgres (uid/gid 1000). fsGroup makes the kubelet give
+      # gid 1000 group-write on the volume, so postgres can create PGDATA on disks
+      # that arrive as root:0755 (Azure Disk). local-path (k3d) is hostPath-based
+      # and ignores fsGroup, but its 0777 dir already allows it.
+      # OnRootMismatch: only walks the volume when the root's ownership is wrong
+      # (avoids a slow recursive chown on every restart once the DB has data).
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: timescaledb
           # Image charged contains the following: PostgreSQL 15.2 + TimescaleDB 2.10.2 +
@@ -58,13 +69,20 @@ spec:
                 secretKeyRef:
                   name: geotracker-secret
                   key: DB_PASSWORD
-            # TimescaleDB stores their data on this location
-            # Should coincide with VolumeMount.
+            # Same data path as Compose and the image default (timescaledb-ha):
+            # /home/postgres/pgdata/data.
             - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
+              value: /home/postgres/pgdata/data
+          # The PVC is mounted on the PARENT of PGDATA, not on PGDATA itself.
+          # Compose mounts the volume straight on .../data and it works because a
+          # Docker named volume copies the image's ownership (postgres). A PVC
+          # arrives owned by root (local-path: 0777; Azure Disk: 0755 + lost+found)
+          # and initdb fails with "could not change permissions ... Operation not
+          # permitted" (tested 2026-11-12). Mounting on the parent lets postgres
+          # create .../data itself, so it owns it. D25.
           volumeMounts:
             - name: datos-postgres
-              mountPath: /var/lib/postgresql/data
+              mountPath: /home/postgres/pgdata
           # Probes: Kubernetes verifies that Postgres responds before sending
           # traffic (readiness) and it restarts if it hangs (liveness).
           readinessProbe:
