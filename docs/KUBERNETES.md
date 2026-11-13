@@ -1,5 +1,8 @@
 # Kubernetes — plan e implementación del milestone
 
+> **Actualización 2026-11-13:** fase 1 aplicada en k3d (D28, D29): BD, PgBouncer, API con token, migraciones y
+> red OSM cargadas; el ETL corre como `CronJob` y el de Compose está apagado. Falta el histórico y Grafana (fase 4).
+>
 > Estado: **Fase 1 en implementación** (actualizado 2026-11-12). El análisis previo (2026-11-09) se
 > conserva abajo como fundamento. Las decisiones que estaban **abiertas** ya se tomaron en esta sesión y se
 > reflejan aquí y en `docs/DECISIONES.md` (D19–D23). Los manifiestos `base` + `overlays/local` ya existen:
@@ -42,7 +45,9 @@ geoTracker/
     │   │   ├── 06-etl-cronjob.yaml
     │   │   ├── 07-migrations-job.yaml
     │   │   ├── 08-ingress.yaml
+    │   │   ├── 09-osm-loader-job.yaml     # red OSM + PVC de caché de osmnx (D29)
     │   │   └── kustomization.yaml
+    │   ├── tools/               # utilidades manuales (no en kustomization): sembrar-cache-osmnx.yaml
     │   └── overlays/
     │       ├── local/           # réplicas 1, parches; Secret desde secret.env (fuera de git, D27)
     │       └── nube/            # réplicas ≥ 2, Ingress + TLS + token, StorageClass de Azure (fase 2)
@@ -123,7 +128,7 @@ Crecimiento de datos estimado (a verificar): `trafico_calles` ~6.5 M filas/día 
 | BD | `StatefulSet` + PVC (fase 1) → operador CloudNativePG (fase 2) | `03` / `03b` | Ver "Base de datos" abajo |
 | `.env` | `Secret` + `ConfigMap` | `01` / `02` | Config no sensible en ConfigMap; credenciales en Secret |
 | Entrada | `Ingress` | `08-ingress.yaml` | Traefik en local; TLS + token en la fase 2 |
-| Carga de red OSM | `Job` manual (`osmnx_loader.py`) | (pendiente) | Necesita salida a internet y volumen para caché de osmnx |
+| Carga de red OSM | `Job` (`osmnx_loader.py`) + PVC `cache-osmnx` | `09-osm-loader-job.yaml` | Espera migraciones ≥ 005. Overpass público rechaza clientes automatizados: la caché se siembra desde el host (D29) |
 | Grafana | `Deployment` + PVC, provisioning | (pendiente, fase 3) | Datasource y dashboards como código |
 | Respaldos | `CronJob` con `pg_dump` | (pendiente) | Hoy manuales; en fase 2 con el operador |
 
@@ -178,6 +183,15 @@ Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos (D5/P8)
   `port-forward` para evitar lidiar con dominios.
 - API (`Deployment` + `Service` + `PodDisruptionBudget` + spread), PgBouncer, ETL (`CronJob`), migraciones (`Job`).
 - Cambios de código 1 y 2 (modo `--una-vez` y `migrate.py` separado).
+- Red OSM con el `Job` `geotracker-osm-loader` (D29). Antes del primer `apply -k`, sembrar la caché de osmnx:
+  ```bash
+  kubectl apply -f deploy/k8s/tools/sembrar-cache-osmnx.yaml   # requiere el PVC: aplicar antes 09 o el overlay
+  kubectl wait -n geotracker --for=condition=ready pod/sembrar-cache-osmnx
+  kubectl cp cache/. geotracker/sembrar-cache-osmnx:/cache
+  kubectl delete -f deploy/k8s/tools/sembrar-cache-osmnx.yaml
+  ```
+- **ETL activo en el cluster desde 2026-11-13 17:15 UTC** (D29). El `etl_worker` de Compose está detrás del perfil
+  `etl-compose`; nunca correr los dos a la vez (misma clave TomTom, pools `consumo_api` separados).
 
 **Criterio de aceptación:** el cluster se recrea desde cero con los comandos documentados; los componentes pasan
 a `Running`; el `Job` de migración queda `Completed`; el `CronJob` ejecuta ciclos; la API responde una ruta real

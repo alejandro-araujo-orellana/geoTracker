@@ -288,6 +288,32 @@ Con el nombre fijo, cambiar un valor no reinicia los pods: `kubectl rollout rest
 warnings; por `port-forward`: sin token 401, con token 503 "La red vial no está cargada" (esperado: falta cargar OSM).
 **Nota operativa:** un `Job` fallido no se re-ejecuta: `kubectl delete job geotracker-migrate` y volver a `apply -k`.
 
+## D29 — Red OSM como `Job` en Kubernetes y corte del ETL de Compose al `CronJob` (2026-11-13)
+**Decisiones:**
+- **`base/09-osm-loader-job.yaml`**: `scripts/osmnx_loader.py` corre como `Job` con la imagen del ETL (el
+  `Dockerfile` ahora copia `scripts/`; se agrega `.dockerignore` para no meter `.env`, `cache/` ni `.git` en el
+  contexto). Un `initContainer` espera a que `schema_migrations` llegue a 005, así un solo `apply -k` sirve aunque
+  el `Job` de migraciones no haya terminado. Va directo a `geotracker-db:5432`, no por PgBouncer: es una carga
+  masiva en una sola transacción y no gana nada con el pool por transacción.
+- **Caché de osmnx en un PVC (`cache-osmnx`, 1 Gi) sembrado desde `./cache` del host.** El Overpass público
+  (`overpass-api.de`) rechaza clientes automatizados: responde un aviso de "monta tu propia instancia" en lugar de
+  JSON (los 3 intentos del primer `Job` fallaron así). Con la caché (mismo bbox y misma versión de osmnx) la carga
+  tardó 27 s y dio la misma red que Compose: 67 464 aristas, 28 008 nodos, 1 componente, 0 aristas sin vértice.
+  Sembrado: `deploy/k8s/tools/sembrar-cache-osmnx.yaml` + `kubectl cp`. Para *actualizar* la red hará falta un
+  Overpass que acepte la carga (instancia propia) o correr el loader en el host y volver a sembrar la caché.
+- **ETL: se apaga el de Compose y se activa el `CronJob`** (se quita el parche `suspend` de D28). El servicio
+  `etl_worker` queda detrás del perfil `etl-compose`, para que un `docker compose up -d` no lo reviva y duplique la
+  cuota; arrancarlo exige `--profile etl-compose` y suspender antes el `CronJob`.
+- **Se copia `consumo_api` del mes a la BD del cluster** antes del primer ciclo. Sin esto el `CronJob` partiría de
+  cero y creería tener la cuota mensual entera (Compose ya llevaba 8 282 tiles y 1 839 Segment Data en noviembre).
+**Verificado:** primer ciclo programado (17:15 UTC) `Complete` en 16 s: presupuesto "mes 7106/200000 antes de hoy",
+49/49 tiles, 14 997 aristas medidas + 52 467 por IDW en `trafico_calles`. `GET /api/v1/rutas` con token devuelve
+una ruta real.
+**Consecuencia — datos partidos:** el histórico (desde 2026-11-09) sigue en la BD de Compose y los ciclos nuevos van
+a la del cluster. Grafana sigue leyendo la de Compose, así que su mapa de calor queda congelado en el último ciclo
+de Compose (17:02 UTC). Pendiente de la fase 4: llevar el histórico al cluster (`pg_dump`/`pg_restore` de datos) y
+desplegar Grafana en el cluster o apuntarlo a su BD.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

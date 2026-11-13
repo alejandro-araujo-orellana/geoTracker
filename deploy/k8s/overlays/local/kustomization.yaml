@@ -51,20 +51,10 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 1
-  # ETL CronJob SUSPENDED locally while the Compose ETL is running. Both use the
-  # same TomTom key but each DB has its own consumo_api pool, so each believes it
-  # owns the full quota: together they would exceed it (~282k of 200k tiles/month).
-  # Also, the cluster DB has no OSM network loaded yet. Remove this patch when
-  # cutting over (phase 4: stop the Compose ETL first). D28.
-  # Manual single run for testing (spends quota!):
-  #   kubectl create job etl-manual --from=cronjob/geotracker-etl -n geotracker
-  - target:
-      kind: CronJob
-      name: geotracker-etl
-    patch: |
-      - op: add
-        path: /spec/suspend
-        value: true
+  # The ETL CronJob is ACTIVE: the Compose ETL is disabled behind a profile (D29).
+  # Never run both: same TomTom key, separate consumo_api pools -> over quota.
+  # To go back to Compose, suspend it first:
+  #   kubectl patch cronjob geotracker-etl -n geotracker -p '{"spec":{"suspend":true}}'
   # Set PgBouncer to 1 replica locally as well (to save memory).
   - target:
       kind: Deployment

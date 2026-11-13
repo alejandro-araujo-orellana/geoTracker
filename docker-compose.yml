@@ -35,6 +35,12 @@ services:
   etl_worker:
     build: .
     container_name: etl_trafico
+    # DESACTIVADO por defecto (D29): el ETL corre ahora como CronJob en Kubernetes.
+    # Ambos usan la misma clave TomTom con pools consumo_api separados: correr los dos
+    # excede la cuota. Solo arranca con `docker compose --profile etl-compose up -d`
+    # (y entonces suspende el CronJob: `kubectl patch cronjob geotracker-etl -n geotracker
+    # -p '{"spec":{"suspend":true}}'`).
+    profiles: ["etl-compose"]
     restart: unless-stopped
     depends_on:
       timescaledb:

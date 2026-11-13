@@ -33,3 +33,4 @@ resources:
   - 06-etl-cronjob.yaml
   - 07-migrations-job.yaml
   - 08-ingress.yaml
+  - 09-osm-loader-job.yaml

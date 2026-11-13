@@ -1,0 +1,9 @@
+# Contexto de build de la imagen del ETL (Dockerfile raíz). Fuera: secretos y pesos muertos.
+.env
+.git
+cache/
+**/__pycache__/
+deploy/
+services/
+docs/
+*:Zone.Identifier

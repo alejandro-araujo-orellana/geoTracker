@@ -21,7 +21,7 @@ Documentación:
 
 ### Docker
 ```bash
-docker compose up -d --build etl_worker api   # reconstruir y levantar ETL + API (la BD y Grafana NO se reconstruyen)
+docker compose up -d --build api             # reconstruir y levantar la API (la BD y Grafana NO se reconstruyen)
 docker compose up -d --wait                   # levantar todo y esperar los healthchecks
 docker compose ps                             # estado
 docker logs -f etl_trafico                    # logs del ETL
@@ -32,7 +32,7 @@ Servicios (Compose v5, `restart: unless-stopped`, credenciales en `.env` — D17
 | Servicio | Contenedor | URL |
 |---|---|---|
 | BD | `trafico_db` | `localhost:5432` |
-| ETL | `etl_trafico` | — (ciclo cada 15 min) |
+| ETL | `etl_trafico` | **apagado** (perfil `etl-compose`): el ETL corre en Kubernetes (D29) |
 | API | `geotracker_api` | http://localhost:8000/docs |
 | Grafana | `grafana_bi` | http://localhost:3000 |
 
@@ -152,7 +152,8 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 
 ## Estado actual y prioridades
 
-1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
+1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos; desde 2026-11-13 17:15 UTC corre como `CronJob`
+   en k3d (D29) y el de Compose está apagado: el histórico previo sigue en la BD de Compose (y Grafana también) (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
 3. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
 4. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).

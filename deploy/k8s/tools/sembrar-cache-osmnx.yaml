@@ -1,0 +1,21 @@
+# Throwaway pod to seed the cache-osmnx PVC with the host's ./cache (D29).
+# NOT part of any kustomization: apply it by hand, kubectl cp, then delete it.
+# See deploy/k8s/base/09-osm-loader-job.yaml.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sembrar-cache-osmnx
+  namespace: geotracker
+spec:
+  restartPolicy: Never
+  containers:
+    - name: sembrar
+      image: busybox:1.36.1
+      command: ["sleep", "900"]
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+  volumes:
+    - name: cache
+      persistentVolumeClaim:
+        claimName: cache-osmnx
