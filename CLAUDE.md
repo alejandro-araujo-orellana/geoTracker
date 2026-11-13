@@ -71,7 +71,9 @@ uno ya aplicado, y actualiza `docs/DATABASE.md`.
 cd scripts && python generador_topologia.py
 
 # 2. Red vial OSM + topología de ruteo → dim_calles_osm y dim_calles_osm_vertices_pgr
-#    Requiere migraciones aplicadas. Ejecutar DESDE LA RAÍZ para reutilizar la caché ./cache de osmnx.
+#    Requiere migraciones aplicadas. Ejecutar DESDE LA RAÍZ (descarga a ./cache/osm).
+#    Fuente por defecto: extracto .osm.pbf del estado (OSM_PBF_URL) — el Overpass público rechaza clientes
+#    automatizados (D30). --pbf archivo.pbf usa uno local; --fuente overpass, la API o su caché ./cache.
 python scripts/osmnx_loader.py
 ```
 `osmnx_loader.py` es idempotente: se puede re-ejecutar sin duplicar la red ni romper el histórico.
@@ -101,7 +103,7 @@ docker run --rm --entrypoint "" -v "$PWD":/app -w /app --network geotracker_red_
 |---|---|---|---|
 | 1. Puntos de monitoreo | `scripts/generador_topologia.py` (+ `cliente_overpass.py`, `procesador_espacial.py`) | Una vez | `data/vialidades_maestras.json` (440 puntos; vías trunk/primary/secondary/tertiary muestreadas cada 1 km en UTM 14N, solo dentro de la zona) |
 | 0. Esquema | `src/migrate.py` + `db/migrations/` | Al arrancar | Tablas, índices, hypertables |
-| 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`) | Cada varios meses | `dim_calles_osm` (67 464 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (28 008 nodos) |
+| 2. Red vial OSM + topología | `scripts/osmnx_loader.py` (+ `osm_utils.py`, `fuente_pbf.py`) | Cada varios meses | `dim_calles_osm` (67 464 aristas; `source/target` = nodos OSM), `dim_calles_osm_vertices_pgr` (28 008 nodos) |
 | 4. ETL + inferencia | `src/main.py` | Cada 15 min | `fact_lecturas_trafico`, `trafico_calles` |
 | 5. Ruteo | `ruta_mas_rapida()` en la BD (011–012) + `GET /api/v1/rutas` (`services/api`) | Bajo demanda | Ruta más rápida con tráfico actual — ver `docs/ROUTING.md` |
 

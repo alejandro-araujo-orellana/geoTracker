@@ -13,8 +13,16 @@ Cuándo ejecutarlo:
 
 Requisitos:
     Migraciones aplicadas hasta la 005 (`python src/migrate.py`).
-    Ejecutar desde la raíz del repo para reutilizar la caché de osmnx en ./cache:
-        python scripts/osmnx_loader.py
+    Ejecutar desde la raíz del repo (descargas y caché en ./cache):
+        python scripts/osmnx_loader.py                    # extracto .pbf (default, D30)
+        python scripts/osmnx_loader.py --pbf archivo.pbf  # un .pbf local, sin descargar
+        python scripts/osmnx_loader.py --fuente overpass  # API de Overpass (o su caché)
+
+Fuente de datos (D30):
+    Por defecto lee un extracto .osm.pbf (OSM_PBF_URL; default: estado de SLP en
+    openstreetmap.fr) con scripts/fuente_pbf.py, porque el Overpass público
+    rechaza clientes automatizados. El grafo lo sigue armando osmnx igual que con
+    Overpass: solo cambia de dónde salen las vías.
 
 Identidad de las aristas (P3/P4 de docs/DATABASE.md):
     osmnx representa la red como un grafo dirigido. Cada arista se identifica
@@ -31,7 +39,9 @@ Identidad de las aristas (P3/P4 de docs/DATABASE.md):
       borran, porque trafico_calles las referencia).
 """
 
+import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -40,6 +50,7 @@ import osmnx as ox
 from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert, text
 
 import config
+import fuente_pbf
 
 # src/ al FINAL del path: así `config` sigue resolviendo a scripts/config.py.
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
@@ -90,18 +101,25 @@ _stg_nodos = Table(
 # ---------------------------------------------------------------------------
 # Etapa 1 — Descargar la red vial desde OpenStreetMap
 # ---------------------------------------------------------------------------
-def descargar_red_vial(bbox: tuple) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+def descargar_red_vial(bbox: tuple, pbf: Path | None = None) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
-    Descarga el grafo vial dirigido (network_type="drive") y lo devuelve como
+    Construye el grafo vial dirigido (network_type="drive") y lo devuelve como
     (nodos, aristas). Las aristas conservan u, v, key como columnas.
+    Con `pbf`, las vías salen de ese extracto; sin él, de Overpass (o su caché).
     """
-    log.info(f"Etapa 1: descargando red vial del bbox {bbox} desde OpenStreetMap...")
-    grafo = ox.graph_from_bbox(
+    origen = f"el extracto {pbf.name}" if pbf else "Overpass"
+    log.info(f"Etapa 1: red vial del bbox {bbox} desde {origen}...")
+    parametros = dict(
         bbox=bbox,
         network_type="drive",
         retain_all=False,  # solo el componente conectado principal
         simplify=True,     # quita nodos intermedios que no son intersecciones
     )
+    if pbf:
+        with fuente_pbf.desde_pbf(pbf):
+            grafo = ox.graph_from_bbox(**parametros)
+    else:
+        grafo = ox.graph_from_bbox(**parametros)
     nodos, aristas = ox.graph_to_gdfs(grafo)
     log.info(f"  → {len(nodos):,} nodos y {len(aristas):,} aristas descargadas")
     return nodos, aristas.reset_index()
@@ -327,11 +345,31 @@ def validar_y_resumir(engine) -> None:
 # ---------------------------------------------------------------------------
 # Orquestador principal
 # ---------------------------------------------------------------------------
-def ejecutar():
+def obtener_pbf(args) -> Path | None:
+    """Ruta del .pbf a usar (descargándolo si hace falta), o None para Overpass."""
+    if args.fuente == "overpass":
+        return None
+    if args.pbf:
+        pbf = Path(args.pbf)
+    else:
+        url = os.environ.get("OSM_PBF_URL", fuente_pbf.URL_PBF_DEFAULT)
+        log.info(f"Descargando extracto OSM: {url}")
+        pbf = fuente_pbf.descargar_pbf(url, Path("cache") / "osm")
+    log.info(f"  → fecha de los datos OSM: {fuente_pbf.fecha_datos(pbf) or '(el extracto no la declara)'}")
+    return pbf
+
+
+def ejecutar(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Carga la red vial OSM en dim_calles_osm (+ vértices).")
+    parser.add_argument("--fuente", choices=["pbf", "overpass"], default="pbf",
+                        help="pbf (default): extracto .osm.pbf; overpass: API de Overpass o su caché")
+    parser.add_argument("--pbf", help="usar este .pbf local en lugar de descargar OSM_PBF_URL")
+    args = parser.parse_args(argv)
+
     log.info("=== osmnx_loader.py iniciando ===")
     engine = create_engine(DB_URL, pool_pre_ping=True)
 
-    nodos, aristas = descargar_red_vial(zona.bbox_osmnx())
+    nodos, aristas = descargar_red_vial(zona.bbox_osmnx(), obtener_pbf(args))
     aristas_reg, nodos_reg = limpiar_red(nodos, aristas, TIPOS_VIA)
     sincronizar_db(aristas_reg, nodos_reg, engine)
     validar_y_resumir(engine)

@@ -12,3 +12,4 @@ scipy==1.17.1
 numpy==2.4.6
 osmnx==2.1.0
 mapbox-vector-tile==2.1.0
+osmium==4.0.2

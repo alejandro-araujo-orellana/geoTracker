@@ -17,16 +17,11 @@
 # initContainer waits for the migrations Job to get there, so the (slow)
 # download never starts against an empty schema. D29.
 #
-# Overpass: the public overpass-api.de refuses automated clients (it answers a
-# "run your own instance" notice instead of JSON). So the osmnx cache lives in a
-# PVC, seeded ONCE from the host ./cache (same bbox + osmnx version = cache hit).
-# Seed it with a throwaway pod that mounts the PVC (see docs/KUBERNETES.md):
-#   kubectl apply -f deploy/k8s/tools/sembrar-cache-osmnx.yaml
-#   kubectl wait -n geotracker --for=condition=ready pod/sembrar-cache-osmnx
-#   kubectl cp cache/. geotracker/sembrar-cache-osmnx:/cache
-#   kubectl delete -f deploy/k8s/tools/sembrar-cache-osmnx.yaml
-# A real refresh of the network needs an Overpass that accepts the load (own
-# instance, or run the loader on the host and seed the new cache files).
+# Source (D30): an .osm.pbf extract (OSM_PBF_URL; default: San Luis Potosí
+# state from openstreetmap.fr, ~15 MB, rebuilt daily), NOT the Overpass API: the
+# public overpass-api.de refuses automated clients. scripts/fuente_pbf.py feeds
+# osmnx the same ways Overpass would return, so the graph is identical (validated
+# edge by edge against the Overpass cache). Needs egress to the download host.
 # ============================================================================
 
 apiVersion: batch/v1
@@ -68,7 +63,7 @@ spec:
           envFrom: &envFrom
             - configMapRef:
                 name: geotracker-config
-          env: &env
+          env:
             # Straight to Postgres, not through PgBouncer: a one-off bulk load in a
             # single long transaction gains nothing from transaction pooling.
             # (Cloud/CNPG overlay: patch to geotracker-db-rw.)
@@ -101,12 +96,32 @@ spec:
           # Run from /app (WORKDIR) like on the host, so osmnx caches in ./cache.
           command: ["python", "scripts/osmnx_loader.py"]
           envFrom: *envFrom
-          env: *env
+          env:
+            - name: DB_HOST
+              value: "geotracker-db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            - name: TOMTOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: TOMTOM_API_KEY
+            # Extract to read. Must cover src/zona.py. Heavier alternative (all of
+            # Mexico, hundreds of MB: raise the emptyDir sizeLimit and memory limit):
+            # https://download.geofabrik.de/north-america/mexico-latest.osm.pbf
+            - name: OSM_PBF_URL
+              value: "https://download.openstreetmap.fr/extracts/north-america/mexico/san_luis_potosi-latest.osm.pbf"
           volumeMounts:
             - name: cache-osmnx
               mountPath: /app/cache
           resources:
-            # osmnx/geopandas build the whole graph in memory (~67k edges).
+            # osmnx/geopandas build the whole graph in memory (~67k edges); the
+            # .pbf pass keeps only the highway ways inside the buffered zone.
             requests:
               memory: "512Mi"
               cpu: "250m"
@@ -114,19 +129,8 @@ spec:
               memory: "2Gi"
               cpu: "1"
       volumes:
+        # The downloaded .pbf (cache/osm/) only lives for this attempt: a re-run
+        # downloads the current extract again, which is what a refresh wants.
         - name: cache-osmnx
-          persistentVolumeClaim:
-            claimName: cache-osmnx
----
-# osmnx cache (Overpass responses, ~120 MB). Persistent so the loader does not
-# depend on the public Overpass server (see header).
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: cache-osmnx
-  namespace: geotracker
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
+          emptyDir:
+            sizeLimit: 256Mi

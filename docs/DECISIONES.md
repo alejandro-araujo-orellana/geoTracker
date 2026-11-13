@@ -314,6 +314,28 @@ a la del cluster. Grafana sigue leyendo la de Compose, así que su mapa de calor
 de Compose (17:02 UTC). Pendiente de la fase 4: llevar el histórico al cluster (`pg_dump`/`pg_restore` de datos) y
 desplegar Grafana en el cluster o apuntarlo a su BD.
 
+## D30 — Red OSM desde un extracto `.osm.pbf` en lugar de Overpass (2026-11-13)
+**Contexto:** el Overpass público rechaza clientes automatizados (D29). La caché sembrada desde el host servía para
+la carga inicial, pero congelaba la red en la fecha de la caché y no permitía actualizarla.
+**Decisión:** `osmnx_loader.py` lee por defecto un extracto `.osm.pbf`. Fuente: `OSM_PBF_URL`, por defecto el
+estado de San Luis Potosí en openstreetmap.fr (~15 MB, regenerado a diario; alternativa: México completo en
+Geofabrik). Lo hace `scripts/fuente_pbf.py` con pyosmium (`osmium==4.0.2`). Solo se reemplaza la *descarga* de
+osmnx: el `.pbf` se convierte en la misma respuesta JSON que daría Overpass y `ox.graph_from_bbox` hace el resto
+sin cambios (búfer de 500 m, truncado, componente mayor, simplificación). La selección replica la consulta de
+osmnx:
+- el filtro `drive` se lee del propio osmnx (`_get_network_filter`) y se evalúa con la semántica de Overpass;
+- se toman las vías con algún nodo dentro del polígono, con todos sus nodos;
+- los elementos van ordenados por id y las coordenadas con 7 decimales.
+Usa internals de osmnx fijados por versión (`osmnx==2.1.0`); al subir osmnx hay que repetir la validación.
+`--fuente overpass` conserva el camino anterior (Overpass o su caché) y `--pbf archivo` usa un extracto local.
+**Validación:** mismo bbox, grafo desde la caché de Overpass (2026-11-09) contra grafo desde el extracto
+(datos 2026-11-13T00:49Z): 28 162 nodos y 67 914 aristas en ambos, 0 diferencias en `(u,v,k)` y 0 en
+`osmid`/`highway`/`name`/`oneway`/`maxspeed`/`length`/geometría. En k3d el `Job` tardó 53 s: 0 aristas nuevas,
+67 464 actualizadas, 0 inactivas, 0 aristas sin vértice, 1 componente.
+**Consecuencias:** el `Job` ya no necesita el PVC `cache-osmnx` ni el pod de sembrado (se eliminan); usa un
+`emptyDir` y necesita salida a internet hacia el servidor del extracto. Actualizar la red = borrar el `Job` y
+volver a `apply -k`. Tests: `tests/test_fuente_pbf.py`.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
