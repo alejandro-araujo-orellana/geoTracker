@@ -272,6 +272,22 @@ en git y en GitHub. El generador lee un archivo que git no ve, y el `apply -k` s
 Con el nombre fijo, cambiar un valor no reinicia los pods: `kubectl rollout restart`. Los valores que estaban en
 `02-secret.yaml` se movieron a `secret.env` y se verificó que coinciden con `.env` y con el `Secret` renderizado.
 
+## D28 — Primer despliegue en k3d: service links, CronJob suspendido e Ingress (2026-11-13)
+**Decisiones:**
+- **PgBouncer con `enableServiceLinks: false` y `PGBOUNCER_PORT` explícito.** Kubernetes inyecta variables por cada
+  Service del namespace; el Service `pgbouncer` genera `PGBOUNCER_PORT=tcp://10.43.x.x:6432`, que choca con la
+  variable homónima de la imagen de Bitnami ("value is not an integer") → `CrashLoopBackOff`, y en cascada fallaban
+  migraciones y ETL (`Connection refused`).
+- **CronJob del ETL suspendido en `overlays/local`** (parche `suspend: true`, declarativo para que `apply -k` no lo
+  reactive). Mientras corre el ETL de Compose, los dos gastarían la misma clave de TomTom con pools `consumo_api`
+  separados (~282 000 de 200 000 tiles/mes), y la BD del cluster aún no tiene la red OSM. Se quita al hacer el corte
+  (fase 4, deteniendo antes el ETL de Compose). Prueba manual: `kubectl create job --from=cronjob/geotracker-etl`.
+- **Ingress con `spec.ingressClassName: traefik`** en lugar de la anotación obsoleta `kubernetes.io/ingress.class`.
+  En AKS la clase será otra y la parchea `overlays/nube`.
+**Verificado:** pods `Running`, Job de migraciones `Complete` (001–012), `/health` ok vía PgBouncer, `apply -k` sin
+warnings; por `port-forward`: sin token 401, con token 503 "La red vial no está cargada" (esperado: falta cargar OSM).
+**Nota operativa:** un `Job` fallido no se re-ejecuta: `kubectl delete job geotracker-migrate` y volver a `apply -k`.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

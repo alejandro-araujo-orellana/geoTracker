@@ -41,6 +41,12 @@ spec:
       labels:
         app: pgbouncer
     spec:
+      # Kubernetes injects "service link" env vars for every Service in the namespace.
+      # Because our Service is named "pgbouncer", that includes
+      # PGBOUNCER_PORT=tcp://10.43.x.x:6432, which collides with the Bitnami image's
+      # own PGBOUNCER_PORT setting and makes it abort ("value is not an integer").
+      # Nothing here uses service links (DNS is used instead), so turn them off.
+      enableServiceLinks: false
       containers:
         - name: pgbouncer
           # bitnami/pgbouncer:1.22.1 no longer exists on Docker Hub (Bitnami moved its
@@ -56,6 +62,9 @@ spec:
             # simple, we point to the local database Service. (An advanced setup
             # might run two PgBouncer instances—one for read-write and one for
             # read-only—but for learning purposes, a single instance is sufficient.)
+            # Explicit as well, so the port never depends on what the cluster injects.
+            - name: PGBOUNCER_PORT
+              value: "6432"
             - name: POSTGRESQL_HOST
               value: "geotracker-db"
             - name: POSTGRESQL_PORT

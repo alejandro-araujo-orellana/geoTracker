@@ -25,22 +25,19 @@ kind: Ingress
 metadata:
   name: geotracker-api
   namespace: geotracker
-  annotations:
-    # When running locally with Traefik (k3d), this is sufficient for routing. 
-    # In the cloud, you would add annotations for TLS (cert-manager) and authentication.
-    #
-    # EXAMPLE of IP-based restriction (using nginx-ingress syntax; Traefik uses 
-    # its own approach via middlewares). Uncomment and add your own IPs when 
-    # deploying to the cloud:
-    # nginx.ingress.kubernetes.io/whitelist-source-range: "YOUR.IP.HERE/32"
-    #
-    # TOKEN-based control is best handled WITHIN your API (e.g., via a header 
-    # that your FastAPI application validates, returning a 401 if it's missing). 
-    # This approach is portable across controllers and independent of the 
-    # underlying infrastructure—it’s the simplest and most robust solution 
-    # for a "personal use" scenario.
-    kubernetes.io/ingress.class: "traefik"
+  # annotations: none needed locally. In the cloud overlay, add the ones for TLS
+  # (cert-manager) and, optionally, IP restriction. EXAMPLE (nginx-ingress syntax;
+  # Traefik uses middlewares instead):
+  #   nginx.ingress.kubernetes.io/whitelist-source-range: "YOUR.IP.HERE/32"
+  #
+  # Token-based access is NOT done here: the API validates the X-API-Key header
+  # itself (D26), which is portable across ingress controllers.
 spec:
+  # Which Ingress controller handles this Ingress. Replaces the deprecated
+  # "kubernetes.io/ingress.class" annotation. "traefik" is the IngressClass that
+  # k3d/k3s installs; on AKS it will differ (e.g. nginx or
+  # webapprouting.kubernetes.azure.com) and the cloud overlay must patch it.
+  ingressClassName: traefik
   rules:
     # For local development without a real domain, you can either use a 
     # dummy hostname mapped in /etc/hosts file, or simply use 
