@@ -155,6 +155,73 @@ misma ruta, demora por tráfico, vigencia del tráfico, calles en orden y geomet
 (`geotracker_datos_postgres`, `geotracker_grafana_data`); extensiones idénticas; ningún conteo disminuyó (el ETL nuevo
 sumó su primer ciclo). Reemplaza la restricción de D15: ya se puede usar `docker compose up -d` normal.
 
+## D18 — Herramientas para el milestone de Kubernetes (preliminar, 2026-11-09)
+**Decisión:** se usarán **Terraform** (infraestructura: cluster, red, registro, respaldos y BD si queda fuera del cluster)
+y **Ansible** (configuración de hosts/VMs y procedimientos operativos como la actualización de TimescaleDB).
+**Prometheus** (+ Alertmanager) es la opción de observabilidad a evaluar. **Puppet queda descartado.** CI/CD (Jenkins o
+GitHub Actions) sigue abierto.
+**Por qué:** cada herramienta cubre una capa distinta y no chocan mientras cada una administre un solo dominio
+(Terraform no despliega las apps; Ansible no despliega contenedores; un solo camino de despliegue). Puppet se traslapa
+con el modelo de contenedores, exige servidor y agentes, y entraría en conflicto con Kubernetes sobre los nodos;
+Ansible cubre la preparación de hosts sin agentes.
+**Dónde:** análisis completo en `docs/KUBERNETES.md` › Herramientas complementarias. Se confirma o ajusta en la
+sesión del milestone.
+
+## D19 — Nube: Azure (AKS), después del entorno local (2026-11-12)
+**Decisión:** el orden es local primero (fase 1) y nube después (fase 2). El proveedor de nube es **Azure (AKS)**,
+con el crédito gratuito de $100 USD como presupuesto. Registro de imágenes: Azure Container Registry o GHCR.
+**Por qué:** aprender Kubernetes en local no consume crédito; el crédito de Azure cubre la fase 2 si el cluster se
+apaga cuando no se usa. La BD gestionada (opción C) se descartó porque ningún servicio ofrece la combinación fijada
+PostgreSQL 15.2 + TimescaleDB 2.10.2 + PostGIS + pgRouting (D17): en la nube la BD irá con CloudNativePG (opción B).
+**Pendiente:** medir el consumo contra el crédito en la fase 2; `overlays/nube` y `deploy/terraform/` aún no existen.
+**Dónde:** `docs/KUBERNETES.md` › Fase 2; manifiestos base en el commit `8461992`.
+
+## D20 — Kustomize (base + overlays), no Helm (2026-11-12)
+**Decisión:** los manifiestos se administran con **Kustomize**: `deploy/k8s/base` (lo común) + `overlays/local` y,
+en la fase 2, `overlays/nube`, que solo parchan lo que difiere (réplicas, almacenamiento, Ingress, secretos).
+**Por qué:** viene integrado en `kubectl` (`apply -k`), son YAML planos sin lenguaje de plantillas, y para un solo
+proyecto con dos entornos no hace falta el empaquetado/versionado de charts de Helm. Helm queda para componentes de
+terceros (p. ej. `kube-prometheus-stack`, fase 3).
+**Consecuencia:** `03b-database-cnpg.yaml` vive en `base/` pero fuera del `kustomization.yaml` hasta instalar el
+operador; el cambio A → B es intercambiar ese archivo en la lista.
+**Dónde:** commit `8461992` (`deploy/k8s/base/kustomization.yaml`, `deploy/k8s/overlays/local/kustomization.yaml`).
+
+## D21 — Cluster local con k3d (2026-11-12)
+**Decisión:** el cluster de desarrollo es **k3d** (k3s dentro de contenedores Docker): 1 server + 2 agentes, cluster
+`geotracker`. Las imágenes se cargan con `k3d image import` (sin registro) e `imagePullPolicy: IfNotPresent`.
+**Por qué:** corre sobre el Docker que ya usa Compose, sin VMs; se recrea con un comando; trae Traefik (Ingress) y el
+provisionador `local-path` (PVC) de fábrica. Varios nodos permiten practicar el reparto de réplicas (D22).
+Terraform/Ansible se reservan para la nube.
+**Ojo:** Compose nombra la imagen del ETL `geotracker-etl_worker`; los manifiestos usan `geotracker-etl`, hay que
+re-etiquetarla antes de importarla (tabla en `docs/KUBERNETES.md` › Imágenes).
+**Dónde:** commit `8461992`.
+
+## D22 — PgBouncer propio, PodDisruptionBudget y reparto entre nodos (2026-11-12)
+**Decisión:** tres añadidos al diseño original, para los dos objetivos del milestone (redundancia y multiusuario):
+- **PgBouncer** como `Deployment` propio (2 réplicas en base, 1 en local), modo `transaction`, 20 conexiones reales a
+  Postgres. Todo el tráfico a la BD pasa por el `Service` `pgbouncer:6432` (`DB_HOST` en el ConfigMap).
+- **PodDisruptionBudget** de la API con `minAvailable: 1`: un drenaje de nodo nunca deja la API en cero.
+- **topologySpreadConstraints** por `kubernetes.io/hostname` (`ScheduleAnyway`): las réplicas de la API en nodos
+  distintos; en la nube podrá endurecerse a `DoNotSchedule`.
+**Por qué:** cada réplica de API (2 workers de uvicorn × pool de 5 + 5) y el ETL abren su propio pool; con 3 réplicas
+se acercan a `max_connections = 100`, y Postgres crea un proceso por conexión. Sin PDB ni reparto, la redundancia de 3
+réplicas es solo teórica: pueden caer juntas en un drenaje o en la caída de un nodo.
+**Notas:** la imagen `bitnami/pgbouncer` ya no está en Docker Hub; se usa `bitnamilegacy/pgbouncer:1.22.1` (sin
+actualizaciones; revisar en la fase 2 o usar el `Pooler` de CloudNativePG). En local, con 1 réplica, el PDB bloquea
+`kubectl drain` (no se puede desalojar el único pod): esperado.
+**Dónde:** commit `8461992` (`04-pgbouncer.yaml`, `05-api.yaml`).
+
+## D23 — API no pública: acceso por token (2026-11-12)
+**Decisión:** la API no se publica (ni en stores ni como servicio abierto). En la nube, el acceso se limita a
+dispositivos propios con un **token en un header** que valida la propia API (401 si falta o no coincide) y,
+opcionalmente, restricción por IP y TLS (cert-manager) en el Ingress.
+**Por qué:** mantiene el proyecto dentro de D8 (datos derivados de TomTom para uso propio/investigación, no
+redistribución pública). El token en la aplicación es portable entre controladores de Ingress (Traefik en local,
+el que se use en AKS), a diferencia de las anotaciones de autenticación de cada controlador.
+**Estado:** **no implementado.** `services/api` aún no valida ningún token y `08-ingress.yaml` solo enruta; se
+implementa en la fase 2, con el token como clave nueva del `Secret`.
+**Dónde:** `08-ingress.yaml` en el commit `8461992`; `docs/KUBERNETES.md` › Fase 2.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
