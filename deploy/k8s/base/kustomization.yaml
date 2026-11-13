@@ -1,0 +1,32 @@
+# ============================================================================
+# base/kustomization.yaml — The index for the base layer
+# ============================================================================
+# Kustomize (built into kubectl) takes a set of manifests and applies them
+# together, allowing "overlays" (local/, cloud/) to modify them without
+# duplication. This file lists WHAT makes up the base.
+#
+# The base is the common denominator: everything that is the same in both
+# local and cloud environments. Overlays only change what differs (replicas,
+# storage, domain, etc.).
+#
+# Note: database-cnpg (03b) is NOT included here by default because it
+# requires the operator to be installed. In a local environment, you start
+# with the StatefulSet (03). When migrating to CloudNativePG, you swap
+# which of the two files is included in this list.
+# ============================================================================
+ 
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+ 
+namespace: geotracker
+ 
+resources:
+  - 00-namespace.yaml
+  - 01-configmap.yaml
+  - 02-secret.yaml              # remember: in a real-world scenario, create this via kubectl, not here
+  - 03-database-statefulset.yaml   # option A (local). For option B: 03b
+  - 04-pgbouncer.yaml
+  - 05-api.yaml
+  - 06-etl-cronjob.yaml
+  - 07-migrations-job.yaml
+  - 08-ingress.yaml

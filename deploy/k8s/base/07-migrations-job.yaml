@@ -1,0 +1,60 @@
+# ============================================================================
+# 07-migrations-job.yaml — Schema migrations as an explicit step
+# ============================================================================
+# A "Job" is a task that runs ONCE until completion (unlike a "CronJob," which
+# repeats). It is perfect for applying schema migrations (db/migrations +
+# migrate.py, D2) before deploying the application.
+#
+# Why use a separate Job instead of an "initContainer" in each API replica?
+# If migrations were to run upon the startup of every replica, having 3 replicas
+# would result in 3 simultaneous attempts to apply the same DDL. While your
+# migrations are idempotent (D2)—which helps—running the same "CREATE"
+# operations in parallel can lead to database locks or race conditions. A Job
+# that runs exactly once, prior to everything else, avoids this cleanly.
+# (This corresponds to code change #2 in KUBERNETES.md.)
+#
+# Deployment order: Database ready → this Job → API + ETL. In a local
+# environment, execute these steps manually in that sequence; in
+# advanced GitOps, "hooks" are used to enforce this order.
+# ============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geotracker-migrate
+  namespace: geotracker
+spec:
+  backoffLimit: 3          # retry if the DB is not ready
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # Reuses the ETL image, which already has migrate.py and the deps.
+          image: geotracker-etl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "src/migrate.py"]
+          envFrom:
+            - configMapRef:
+                name: geotracker-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            # migrate.py imports src/config.py, which reads TOMTOM_API_KEY with
+            # os.environ[...] at import time: without it the Job dies with KeyError.
+            - name: TOMTOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: TOMTOM_API_KEY
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"

@@ -1,14 +1,58 @@
-# Kubernetes — análisis y plan para el siguiente milestone
+# Kubernetes — plan e implementación del milestone
 
-> Estado: **análisis previo, nada implementado** (2026-11-09). Este documento es el punto de partida para la
-> sesión en la que se abra la rama del milestone de Kubernetes. Las decisiones marcadas como **abiertas** se
-> toman en esa sesión y se registran en `docs/DECISIONES.md`.
+> Estado: **Fase 1 en implementación** (actualizado 2026-11-12). El análisis previo (2026-11-09) se
+> conserva abajo como fundamento. Las decisiones que estaban **abiertas** ya se tomaron en esta sesión y se
+> reflejan aquí y en `docs/DECISIONES.md` (D19–D23). Los manifiestos `base` + `overlays/local` ya existen:
+> renderizan con `kubectl kustomize` y pasan `kubectl apply -k --dry-run=client --validate=strict` contra el
+> cluster k3d (13 objetos, 2026-11-12). **Aún no se han aplicado**: el `CronJob` del ETL requiere el modo
+> `--una-vez` (cambio de código 1, pendiente). `overlays/nube` no existe todavía (fase 2).
 
 ## Objetivo
 
-Desplegar geoTracker (BD, ETL, API, Grafana) sobre Kubernetes, **una vez acumulados varios días de datos** con
-el stack actual de Compose, con **dualidad local / nube**: los mismos manifiestos deben poder correr en un
-cluster local (desarrollo) y en uno administrado en la nube (producción).
+Desplegar geoTracker (BD, ETL, API, Grafana) sobre Kubernetes, con **dualidad local / nube**: los mismos
+manifiestos deben poder correr en un cluster local (desarrollo) y en uno administrado en la nube (producción).
+Dos objetivos concretos guían el diseño:
+
+1. **Redundancia / tolerancia a fallos**: que la caída de un pod, un nodo o un despliegue nuevo no deje el
+   servicio sin responder.
+2. **Manejo de tráfico multiusuario**: repartir la carga de varias peticiones entre varias réplicas para que
+   ninguna sea un cuello de botella único.
+
+## Ubicación de los manifiestos
+
+Todo lo de despliegue vive en `deploy/` en la raíz del repo, versionado junto al código que despliega (el
+manifiesto de la versión X de la API viaja en el mismo commit que esa versión X):
+
+```
+geoTracker/
+├── docker-compose.yml          # el stack de Compose sigue existiendo (desarrollo rápido)
+├── db/ src/ scripts/ ...        # código actual
+├── docs/
+│   ├── DECISIONES.md
+│   └── KUBERNETES.md            # este documento
+└── deploy/
+    ├── k8s/
+    │   ├── base/                # manifiestos comunes a local y nube + kustomization.yaml
+    │   │   ├── 00-namespace.yaml
+    │   │   ├── 01-configmap.yaml
+    │   │   ├── 02-secret.yaml            # PLANTILLA; en real se crea por comando o Sealed Secrets
+    │   │   ├── 03-database-statefulset.yaml   # BD opción A (local, fase 1)
+    │   │   ├── 03b-database-cnpg.yaml         # BD opción B (CloudNativePG, fase 2)
+    │   │   ├── 04-pgbouncer.yaml
+    │   │   ├── 05-api.yaml               # Deployment + Service + PodDisruptionBudget
+    │   │   ├── 06-etl-cronjob.yaml
+    │   │   ├── 07-migrations-job.yaml
+    │   │   ├── 08-ingress.yaml
+    │   │   └── kustomization.yaml
+    │   └── overlays/
+    │       ├── local/           # réplicas 1, parches para la máquina de desarrollo
+    │       └── nube/            # réplicas ≥ 2, Ingress + TLS + token, StorageClass de Azure (fase 2)
+    ├── terraform/               # (fase 2) infraestructura de Azure
+    └── ansible/                 # (fase 2, si aplica) preparación de hosts / actualización de TimescaleDB
+```
+
+Cada herramienta administra **un solo dominio** (D18): Terraform crea el cluster y la red; Kustomize despliega
+las apps; Ansible prepara hosts y tareas operativas. No se pisan.
 
 ## Conclusión del análisis
 
@@ -19,7 +63,7 @@ Kubernetes gracias a decisiones de la rama `feat/ruteo-dijkstra-postgis`:
 |---|---|---|
 | Imágenes reproducibles con versión fija | ✅ | D10, D17 |
 | Contenedores inmutables (sin montar el código) | ✅ | D17 |
-| Configuración por variables de entorno | ✅ (`.env` → pasará a `Secret`/`ConfigMap`) | D17 |
+| Configuración por variables de entorno | ✅ (`.env` → `Secret`/`ConfigMap`) | D17, fase 1 |
 | Esquema versionado y aplicable de forma idempotente | ✅ `db/migrations` + `migrate.py` | D2 |
 | Procesos idempotentes (repetir un ciclo no duplica) | ✅ | D4, P6 |
 | Estado fuera del proceso (cuotas en la BD, no en memoria) | ✅ `consumo_api` | D7 |
@@ -29,6 +73,29 @@ Kubernetes gracias a decisiones de la rama `feat/ruteo-dijkstra-postgis`:
 **La parte difícil es la base de datos** (sección propia abajo). **El costo real es operativo**: para la escala
 actual (una ciudad, ciclo ETL de ~12 s cada 15 min, API ligera) Compose es suficiente; Kubernetes se justifica
 por aprendizaje/portafolio, crecimiento (varias ciudades, más tráfico en la API) o alta disponibilidad.
+
+## Decisiones tomadas en esta sesión (antes abiertas)
+
+Estas cierran las preguntas del final del documento y se registran en `DECISIONES.md`:
+
+- **Orden local → nube** (pregunta 1): local primero para aprender sin quemar crédito; nube después.
+- **Proveedor de nube** (pregunta 2): **Azure** (AKS), aprovechando $100 USD de crédito gratuito. Presupuesto:
+  el crédito; medir consumo en la fase 2, apagar el cluster cuando no se use.
+- **Base de datos** (pregunta 3): **opción A (StatefulSet) en local para la fase 1; opción B (CloudNativePG)
+  en la fase 2**. La actualización de TimescaleDB 2.10.2 se evalúa como prerrequisito de la fase 2, no "de paso".
+- **Kustomize, no Helm** (pregunta 4): `base` + overlays; más simple para aprender y sin plantillas.
+- **API no pública, acceso restringido** (pregunta 5): no se publica en ninguna store. En la nube, el acceso se
+  limita a dispositivos propios por **token** (header que valida la API) y/o restricción por IP en el Ingress.
+  Esto mantiene el proyecto del lado seguro de D8 (uso en investigación/desarrollo, no redistribución pública).
+- **Añadidos al diseño original** (confirmados contra los dos objetivos):
+  - **PgBouncer como Deployment propio**: evita agotar `max_connections` con varias réplicas de API + ETL.
+  - **PodDisruptionBudget (`minAvailable: 1`)**: garantiza que un drenaje de nodo nunca deje la API en cero.
+  - **topologySpreadConstraints**: reparte las réplicas de la API entre nodos distintos.
+- **Cluster local: k3d** (pregunta 7): sobre Docker, sin VMs; Terraform/Ansible se reservan para la nube.
+
+Siguen **abiertas** para fases posteriores: CI/CD Jenkins vs GitHub Actions (pregunta 6), detalles de Terraform
+y `tfstate` remoto (pregunta 8), Grafana del chart vs el actual y Pushgateway (pregunta 9), y el canal de
+alertas (pregunta 10). Se deciden en las fases 3 y 5.
 
 ## Línea base medida (Compose, 2026-11-09)
 
@@ -41,109 +108,242 @@ Datos para dimensionar `requests`/`limits` y volúmenes. Volver a medir con vari
 | API (`geotracker_api`) | ~131 MiB | <1 % | 302 MB | Ruta en ~0.3 s (pgr_dijkstra carga el grafo por petición) |
 | Grafana (`grafana_bi`) | ~125 MiB | ~1 % | 1.47 GB | — |
 
+Los `requests`/`limits` de los manifiestos salen de esta tabla, con margen para los picos del predictor.
+
 Crecimiento de datos estimado (a verificar): `trafico_calles` ~6.5 M filas/día y `fact_flujo_aristas`
 ~1.4 M filas/día antes de compresión (a los 7 días). Con 1 día: `trafico_calles` 113 MB, `fact_flujo_aristas` 13 MB.
 
-## Mapeo propuesto de componentes
+## Mapeo de componentes (implementado en `deploy/k8s/base`)
 
-| Componente | Recurso de Kubernetes | Notas |
-|---|---|---|
-| API | `Deployment` (≥ 2 réplicas) + `Service` + `Ingress` | Readiness/liveness en `/health`. Candidata a `HorizontalPodAutoscaler` |
-| ETL | **`CronJob`** `*/15 * * * *`, `concurrencyPolicy: Forbid`, `timeZone: America/Mexico_City` | Reemplaza el `while True` de `main.py`. `Forbid` garantiza que nunca corran dos ciclos (dos ciclos simultáneos gastarían cuota doble) |
-| Migraciones | `Job` (o `initContainer` de la API) | Hoy corren al arrancar el ETL; con `CronJob` + API conviene un paso explícito previo al despliegue |
-| Carga de red OSM | `Job` manual (`osmnx_loader.py`) | Necesita salida a internet y volumen para la caché de osmnx |
-| Grafana | `Deployment` (1 réplica) + `PersistentVolumeClaim` | Datasource y dashboards por provisioning (ConfigMap) en lugar de configurarlos a mano |
-| BD | `StatefulSet` + PVC, operador, o servicio externo | **Decisión abierta** (ver abajo) |
-| `.env` | `Secret` (credenciales, `TOMTOM_API_KEY`) + `ConfigMap` (no sensible) | Valorar Sealed Secrets / External Secrets para la nube |
-| Respaldos | `CronJob` con `pg_dump` a PVC u object storage | Hoy son manuales (`~/backups_geotracker`) |
+| Componente | Recurso de Kubernetes | Archivo | Notas |
+|---|---|---|---|
+| API | `Deployment` (3 réplicas en base, 1 en local) + `Service` + `PodDisruptionBudget` | `05-api.yaml` | Readiness/liveness en `/health`. Spread entre nodos. Candidata a HPA |
+| Pooler | `Deployment` (2 réplicas) + `Service` | `04-pgbouncer.yaml` | Todo el tráfico a la BD pasa por aquí (puerto 6432) |
+| ETL | `CronJob` `*/15`, `Forbid`, `timeZone: America/Mexico_City` | `06-etl-cronjob.yaml` | Reemplaza el `while True`. `Forbid` = nunca cuota doble |
+| Migraciones | `Job` explícito (no initContainer) | `07-migrations-job.yaml` | Corre una vez antes de la app; evita carreras entre réplicas |
+| BD | `StatefulSet` + PVC (fase 1) → operador CloudNativePG (fase 2) | `03` / `03b` | Ver "Base de datos" abajo |
+| `.env` | `Secret` + `ConfigMap` | `01` / `02` | Config no sensible en ConfigMap; credenciales en Secret |
+| Entrada | `Ingress` | `08-ingress.yaml` | Traefik en local; TLS + token en la fase 2 |
+| Carga de red OSM | `Job` manual (`osmnx_loader.py`) | (pendiente) | Necesita salida a internet y volumen para caché de osmnx |
+| Grafana | `Deployment` + PVC, provisioning | (pendiente, fase 3) | Datasource y dashboards como código |
+| Respaldos | `CronJob` con `pg_dump` | (pendiente) | Hoy manuales; en fase 2 con el operador |
 
-## Base de datos — decisión abierta
+## Base de datos — decisión tomada (A → B)
 
 Motor actual: imagen propia fijada `geotracker-timescaledb:pg15.2-ts2.10.2` (PostgreSQL 15.2, TimescaleDB 2.10.2,
 PostGIS 3.3.2, pgRouting 4.0.1 — D17). Esta combinación **no** se ofrece tal cual en los servicios administrados
-habituales (los Postgres administrados genéricos no suelen incluir TimescaleDB; los de Timescale pueden no incluir
-pgRouting — verificar en su momento).
+habituales, por eso se descartó la opción C de BD gestionada.
 
-| Opción | A favor | En contra |
-|---|---|---|
-| A. `StatefulSet` simple con la imagen propia | Igual en local y nube; control total de extensiones | Respaldos, failover y actualizaciones son responsabilidad propia |
-| B. Operador (p. ej. CloudNativePG) con imagen propia | Respaldos, réplicas y failover gestionados por el operador | Requiere imagen compatible con el operador; curva de aprendizaje; validar TimescaleDB + pgRouting |
-| C. BD fuera del cluster (VM o servicio administrado) | Kubernetes solo para lo stateless; menos riesgo | Dos plataformas; en la nube, depende de encontrar TimescaleDB + PostGIS + pgRouting |
+| Opción | A favor | En contra | Uso |
+|---|---|---|---|
+| A. `StatefulSet` simple con imagen propia | Igual en local y nube; control total de extensiones | Punto único de fallo; respaldos/failover propios | **Fase 1 (local)** |
+| B. Operador CloudNativePG con imagen propia | Réplicas, failover y respaldos gestionados; dos Services read/write automáticos | Requiere imagen compatible; validar TimescaleDB + pgRouting | **Fase 2 (nube)** |
+| C. BD fuera del cluster | Kubernetes solo para lo stateless | Depende de encontrar TimescaleDB + PostGIS + pgRouting gestionado | Descartada |
 
-Recomendación inicial: **A en local** para aprender y validar; decidir **B o C para la nube** tras probarlo.
+Por qué B cumple los objetivos y A no: con A (una réplica) la caída de la BD deja toda la API sin servicio
+(toda la lógica de ruteo vive en la BD, D14). B levanta primaria + réplicas con failover automático, y crea
+`geotracker-db-rw` (escritura, siempre la primaria) y `geotracker-db-ro` (lectura, reparte entre réplicas) —
+exactamente lo que `database.py` espera con `DATABASE_WRITE_URL` / `DATABASE_READ_URL`.
 
-**Prerrequisito probable para la nube:** planear la actualización de PostgreSQL 15.2 / TimescaleDB 2.10.2 (≈ 3 años)
-a versiones soportadas. Es una migración propia: respaldo, `ALTER EXTENSION timescaledb UPDATE` (y de pgRouting),
-pruebas con una copia, plan de vuelta atrás. Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks
-comprimidos (D5/P8); versiones más nuevas sí, lo que permitiría simplificar `ANTIGUEDAD_MAXIMA` del predictor.
+**Prerrequisito de la fase 2:** planear la actualización de PostgreSQL 15.2 / TimescaleDB 2.10.2 (≈ 3 años) a
+versiones soportadas, y **validar que la imagen fijada arranca bajo CloudNativePG** antes de confiar en `03b`.
+Es una migración propia: respaldo, `ALTER EXTENSION ... UPDATE`, pruebas con copia, plan de vuelta atrás.
+Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos (D5/P8); versiones más nuevas sí.
 
 ## Cambios de código previstos (antes o durante el milestone)
 
-1. **Modo "un ciclo" en el ETL**: `python src/main.py --una-vez` (ejecuta `ciclo_etl` y termina, con código de salida
-   distinto de 0 si falla) para el `CronJob`. El modo daemon puede quedarse para Compose.
-2. **Sacar las migraciones del arranque del ETL** a un comando/`Job` explícito (`python src/migrate.py`).
-3. **Grafana como código**: datasource y dashboards en archivos de provisioning versionados.
-4. **Sondas**: el ETL como `CronJob` no necesita liveness; si se mantuviera como `Deployment`, haría falta un latido
-   (p. ej. archivo o endpoint) porque un `while True` colgado no se detecta.
-5. **Apagado ordenado**: manejar `SIGTERM` en el ETL para no cortar un ciclo a la mitad (aunque es idempotente).
-6. **Rendimiento de la API con réplicas**: `pgr_dijkstra` carga el grafo completo en cada petición; con más tráfico
-   en la API, evaluar `pgr_aStar`, limitar el grafo por bbox origen-destino, o caché de rutas.
-7. **Pool de conexiones**: con varias réplicas de la API + ETL, revisar `max_connections` de PostgreSQL o agregar PgBouncer.
+1. **Modo "un ciclo" en el ETL**: `python src/main.py --una-vez` (ejecuta `ciclo_etl` y termina, exit != 0 si
+   falla) para el `CronJob`. El modo daemon se queda para Compose. — **requerido por `06-etl-cronjob.yaml`**
+2. **Migraciones como comando aparte** (`python src/migrate.py`), fuera del arranque del ETL. — **requerido por
+   `07-migrations-job.yaml`**
+3. **Grafana como código**: datasource y dashboards en provisioning versionado. — fase 3
+4. **Sondas**: el ETL como `CronJob` no necesita liveness; la API ya tiene `/health`.
+5. **Apagado ordenado (SIGTERM)** en el ETL para no cortar un ciclo a la mitad (aunque es idempotente).
+6. **Rendimiento de la API con réplicas**: `pgr_dijkstra` carga el grafo completo por petición; con más tráfico,
+   evaluar `pgr_aStar`, limitar el grafo por bbox origen-destino, o caché de rutas. Es el techo real de escala,
+   no el número de pods.
+7. **Pool de conexiones**: resuelto con **PgBouncer** como Deployment propio (`04-pgbouncer.yaml`).
+
+## Plan por fases
+
+### Fase 1 — Entorno base en Kubernetes local (en curso)
+
+**Entregable:** cluster local k3d + manifiestos `base` + `overlays/local` corriendo, con:
+
+- **BD como `StatefulSet`** (opción A) con PVC: `03-database-statefulset.yaml`.
+- **Secrets** por una de dos vías, a elección:
+  - por comando: `kubectl create secret generic geotracker-secret --from-literal=...` (recomendado para no
+    tocar archivos con la API key), o
+  - desde `02-secret.yaml` con `stringData`, manteniéndolo **fuera de git** (`.gitignore`).
+- **Ingress** con la estructura inicial (`08-ingress.yaml`, Traefik de k3d); en local se prueba con
+  `port-forward` para evitar lidiar con dominios.
+- API (`Deployment` + `Service` + `PodDisruptionBudget` + spread), PgBouncer, ETL (`CronJob`), migraciones (`Job`).
+- Cambios de código 1 y 2 (modo `--una-vez` y `migrate.py` separado).
+
+**Criterio de aceptación:** el cluster se recrea desde cero con los comandos documentados; los componentes pasan
+a `Running`; el `Job` de migración queda `Completed`; el `CronJob` ejecuta ciclos; la API responde una ruta real
+por `port-forward`. Borrar un pod de la API a mano y verlo recrearse solo (prueba de auto-reparación).
+
+### Fase 2 — Robustez y nube (Azure)
+
+**Entregable:** `overlays/nube` sobre AKS, con:
+
+- **BD con CloudNativePG** (opción B): intercambiar `03-database-statefulset.yaml` por `03b-database-cnpg.yaml`
+  en el `kustomization`, tras instalar el operador y **validar la compatibilidad de la imagen fijada**.
+  Repuntar `DATABASE_READ_URL` a `geotracker-db-ro` y `DATABASE_WRITE_URL` a `geotracker-db-rw`.
+- **Secrets por Sealed Secrets o External Secrets**: permite versionar una versión cifrada del secreto que solo
+  el cluster descifra (en local, crear por comando basta; en la nube con GitOps, no).
+- **Ingress mejorado con token**: la API valida un header secreto y rechaza con 401 lo demás; opcionalmente
+  restricción por IP. TLS con cert-manager. Esto implementa el control de acceso "solo mis dispositivos" (D8).
+- **Infraestructura con Terraform** (`deploy/terraform/`): cluster AKS, red, registro de imágenes, backend
+  remoto para el `tfstate` (nunca en git, nunca con secretos en claro).
+- **Prerrequisito:** actualización de TimescaleDB como playbook de Ansible (respaldo → actualización →
+  verificación), con copia de los datos.
+
+**Criterio de aceptación:** `terraform apply` crea el entorno; mismo comportamiento que en local; la BD tolera
+la caída de la primaria (failover); el acceso sin token es rechazado; costos medidos contra el crédito.
+
+### Fases posteriores (del plan original, sin cambios)
+
+| Fase | Entregable | Criterio |
+|---|---|---|
+| 3 | Observabilidad: Prometheus + Alertmanager + Grafana único; API instrumentada; métricas del ETL | Alertas funcionando (ciclo fallido, cuota, 403, API, disco) |
+| 4 | Migración de datos de Compose al cluster (pg_dump/pg_restore con la imagen fijada) | Conteos y ruta de prueba idénticos |
+| 5 | Afinación de costos en Azure y respaldos automatizados | Crédito controlado; respaldos probados |
 
 ## Dualidad local / nube
 
-- **Local:** k3d o kind (también minikube, ya usado en esta máquina). Registro de imágenes local
-  (`k3d registry` / `kind load docker-image`).
-- **Nube:** GKE / EKS / AKS (decisión abierta). Registro: GHCR o el del proveedor.
-- **Manifiestos:** un solo juego con **Kustomize** (`base` + `overlays/local` + `overlays/nube`) o un chart de Helm.
-  Estructura sugerida:
+- **Local:** k3d sobre Docker. Imágenes al cluster con `k3d image import` (no hay registro remoto).
+- **Nube:** AKS. Registro: Azure Container Registry o GHCR. Imágenes con `docker push`.
+- **Manifiestos:** un solo juego con **Kustomize** (`base` + `overlays/local` + `overlays/nube`). El overlay
+  parcha solo lo que difiere (réplicas, almacenamiento, Ingress, secretos).
 
-```
-deploy/k8s/
-  base/            # Deployments, CronJob, Services, ConfigMaps, StatefulSet de la BD
-  overlays/
-    local/         # réplicas 1, NodePort/port-forward, PVC local-path, imágenes del registro local
-    nube/          # réplicas ≥ 2, Ingress + TLS, StorageClass del proveedor, Secrets externos
-```
+### Imágenes: de dónde sale cada una
 
-- **CI** (opcional en el milestone): construir y publicar las imágenes con tag = commit, correr los tests de
-  integración contra una BD efímera, y validar manifiestos (`kubectl --dry-run=server` / kubeconform).
+Los manifiestos solo nombran imágenes; este es el contexto de construcción de cada una (verificado contra el
+repo y `docker-compose.yml` el 2026-11-12):
+
+| Imagen en los manifiestos | Contexto / Dockerfile | Usada por | Nombre que le da Compose |
+|---|---|---|---|
+| `geotracker-api:latest` | `./services/api` (`services/api/Dockerfile`, copia `app/`) | `05-api.yaml` | `geotracker-api` (igual) |
+| `geotracker-etl:latest` | `.` (raíz, `Dockerfile`; copia `src/`, `data/`, `db/migrations/`) | `06-etl-cronjob.yaml`, `07-migrations-job.yaml` | `geotracker-etl_worker` (**distinto**: hay que re-etiquetar) |
+| `geotracker-timescaledb:pg15.2-ts2.10.2` | `./db` (`db/Dockerfile`, base fijada por digest) | `03` / `03b` | igual (D17) |
+| `bitnamilegacy/pgbouncer:1.22.1` | Docker Hub | `04-pgbouncer.yaml` | — |
+
+Las rutas de los comandos (`python src/main.py`, `python src/migrate.py`) resuelven contra `WORKDIR /app` de la
+imagen del ETL; `migrate.py` busca `/app/db/migrations`, que la imagen incluye.
+
+```bash
+docker build -t geotracker-api:latest ./services/api
+docker build -t geotracker-etl:latest .            # o: docker tag geotracker-etl_worker:latest geotracker-etl:latest
+k3d image import geotracker-api:latest geotracker-etl:latest geotracker-timescaledb:pg15.2-ts2.10.2 -c geotracker
+```
+⚠️ No reconstruir `geotracker-timescaledb` para esto: ya existe (D17); solo importarla.
+
+## Herramientas complementarias
+
+Decidido (D18): **Terraform y Ansible se usarán** (fase 2+); **Prometheus** para observabilidad (fase 3);
+**Puppet descartado**. CI/CD (Jenkins o GitHub Actions) sigue abierto (fase 3+).
+
+Cada herramienta tiene **un solo dominio** que gestiona. El choque no viene de usar varias, sino de que dos
+administren lo mismo (cada una "corrige" el estado de la otra: *drift*).
+
+| Capa | Herramienta | Gestiona | **No** debe gestionar |
+|---|---|---|---|
+| Infraestructura | **Terraform** (u OpenTofu) | Cluster, red, nodos, volúmenes, registro, BD gestionada (si fuera opción C) | Lo que corre dentro del cluster |
+| Configuración de máquinas | **Ansible** | Preparar hosts/VMs, actualización de TimescaleDB como playbook | Las apps; lo que hace Terraform |
+| Aplicaciones | **Kustomize** (+ opcional Argo CD) | Deployments, CronJob, Services, Secrets/ConfigMaps | La infraestructura subyacente |
+| Construcción y pruebas | **CI** (Jenkins o GitHub Actions) | Construir imágenes, tests, publicar en el registro | Desplegar si se usa GitOps: un solo camino |
+| Observabilidad | **Prometheus** + Alertmanager + Grafana | Métricas de operación y alertas | — |
+
+### Terraform
+
+- **Para qué:** en la nube, el cluster AKS, la red/VNet, el registro de imágenes, los buckets para respaldos.
+  En local es opcional (k3d ya es reproducible con un comando).
+- **Dualidad:** módulos por componente y un `tfvars` por entorno, en paralelo a los overlays de Kustomize.
+- **Estado (`tfstate`):** contiene datos sensibles. En local, archivo fuera de git; en la nube, backend remoto
+  con bloqueo. Agregar `*.tfstate*` y `.terraform/` a `.gitignore`.
+- **Secretos:** nunca en `.tf` ni `tfvars` versionados; usar `TF_VAR_*` o el gestor de secretos de Azure.
+- **Límite con Kubernetes:** Terraform hasta el cluster y componentes de plataforma (ingress controller,
+  stack de Prometheus); las apps de geoTracker con Kustomize.
+
+### Ansible
+
+- **Para qué:** preparar hosts si se usaran VMs; **la actualización de TimescaleDB como playbook repetible**
+  (respaldo → actualización → verificación) — prerrequisito de la fase 2.
+- **Sin agentes** (solo SSH). Con AKS 100 % administrado, su uso principal es el playbook de actualización y la
+  opción C (descartada), así que su peso es menor.
+- **Secretos:** Ansible Vault o variables de entorno; nada en claro en el repo.
+
+### Prometheus (fase 3)
+
+- **Instalación:** chart `kube-prometheus-stack`.
+- **Grafana único:** decidir entre el del chart y el actual, con dos datasources (TimescaleDB para negocio,
+  Prometheus para operación).
+- **Qué medir:**
+
+  | Componente | Métricas | Cómo |
+  |---|---|---|
+  | ETL | Ciclo exitoso/fallido, duración, aristas medidas, tiles | El `CronJob` vive ~12 s: Pushgateway al final del ciclo, o `kube-state-metrics` + consultas a la BD |
+  | Cuotas TomTom | Consumo del mes vs cuota, 403 | Ya en `consumo_api`: `postgres_exporter` o Pushgateway |
+  | API | Latencia, errores, peticiones | `prometheus-fastapi-instrumentator` (`/metrics`) + `ServiceMonitor` |
+  | BD | Conexiones, tamaño, locks, chunks/compresión | `postgres_exporter` |
+  | Cluster | CPU/memoria de pods, reinicios, PVCs | Incluido en el chart |
+
+- **Alertas iniciales:** sin ciclo exitoso del ETL en 45 min; consumo de cuota por encima del ritmo diario;
+  cualquier 403 de TomTom; API no sana o p95 de `/rutas` > 2 s; PVC de la BD > 80 %.
+- **Costo:** el stack pide ~1–2 GB de RAM; en local, configuración reducida (sin réplicas, retención corta).
+- **Retención:** corta (7–15 días) para operación; el histórico de tráfico sigue en TimescaleDB.
+
+### CI/CD (abierto, fase 3+)
+
+- **Qué hace el pipeline:** construir imágenes (ETL, API) con tag = commit, correr los tests (los de
+  integración con una BD efímera con la imagen fijada), validar manifiestos y `terraform plan`, publicar.
+- **GitHub Actions:** sin servidor que mantener; el repo ya está en GitHub.
+- **Jenkins:** tiene sentido si se busca aprenderlo; requiere mantenimiento y ~1 GB RAM.
+- **Un solo camino de despliegue:** o el CI aplica los manifiestos, o el CI solo publica y Argo CD/Flux despliega.
+
+### Puppet: descartado
+
+Se traslapa con el modelo de contenedores; la preparación de hosts la cubre Ansible sin agentes; exige servidor
+y agentes permanentes y chocaría con Kubernetes sobre los nodos.
 
 ## Migración de datos
 
-Los datos acumulados en Compose se trasladan con `pg_dump -Fc` (como los respaldos actuales) y `pg_restore` en la
-BD del cluster, usando **la misma imagen fijada** para no mezclar versiones de extensiones. Verificar después:
-conteos por tabla, versiones de extensiones, `schema_migrations` y una ruta de prueba. Durante el corte, detener el
-ETL en Compose para no partir los datos entre dos BD.
-
-## Plan por fases (propuesta)
-
-| Fase | Entregable | Criterio de aceptación |
-|---|---|---|
-| 0 | Cambios de código 1–2 + respaldo automatizado | ETL corre con `--una-vez`; migraciones como comando aparte; tests en verde |
-| 1 | Cluster local + manifiestos `base` + `overlays/local` | Los 4 componentes arriba; `CronJob` ejecuta ciclos; API responde rutas |
-| 2 | Datos migrados al cluster local | Conteos y ruta de prueba idénticos a Compose |
-| 3 | Observabilidad mínima | Alertas si un ciclo falla, si la cuota de tiles se acerca al límite (`consumo_api`) o si la API no está sana |
-| 4 | Decisión y prueba de la BD para la nube (+ actualización de TimescaleDB si aplica) | Opción B o C validada con una copia de los datos |
-| 5 | `overlays/nube` en el proveedor elegido | Mismo comportamiento que en local; costos medidos |
+Los datos acumulados en Compose se trasladan con `pg_dump -Fc` y `pg_restore` en la BD del cluster, usando **la
+misma imagen fijada** para no mezclar versiones de extensiones. Verificar después: conteos por tabla, versiones
+de extensiones, `schema_migrations` y una ruta de prueba. Durante el corte, detener el ETL en Compose para no
+partir los datos entre dos BD. (Fase 4.)
 
 ## Riesgos
 
-- **Cuota TomTom duplicada** si por error corren dos ETL (Compose y cluster, o dos pods): `concurrencyPolicy: Forbid`
-  y apagar el ETL de Compose al migrar. El pool (`consumo_api`) limita el daño, pero solo si ambos usan la misma BD.
-- **Términos de TomTom** sobre almacenar datos derivados de tiles: sigue pendiente (D8). Más relevante si el servicio
-  se vuelve público en la nube.
-- **Versión de la BD** (ver arriba): no actualizarla "de paso" al migrar a Kubernetes.
-- **Costos en la nube:** el plano de control administrado + volúmenes + balanceador suelen costar más que una VM
-  pequeña con Compose; medirlo en la fase 5.
-- **Tamaño de imágenes:** BD 4.5 GB y ETL 2.3 GB (GDAL/geopandas) alargan despliegues y arranques en nodos nuevos;
-  valorar imágenes multi-etapa o separar el `osmnx_loader` (pesado) del ETL del ciclo.
+- **Cuota TomTom duplicada** si por error corren dos ETL (Compose y cluster, o dos pods): `concurrencyPolicy:
+  Forbid` y apagar el ETL de Compose al migrar. El pool (`consumo_api`) limita el daño solo si ambos usan la
+  misma BD.
+- **Términos de TomTom** sobre almacenar datos derivados de tiles (D8): free tier permite uso comercial;
+  pendiente verificar la cláusula de almacenamiento/redistribución de *tiles* antes de exponer la API
+  públicamente. Mitigado en el diseño: la API no es pública, se restringe por token a dispositivos propios.
+- **Compatibilidad de la imagen con CloudNativePG** (fase 2): validar antes de confiar en `03b`; si la imagen
+  fijada no es compatible de fábrica, construir una basada en las imágenes del operador + las extensiones.
+- **Versión de la BD:** no actualizarla "de paso" al migrar a Kubernetes; es una migración propia (fase 2).
+- **Costos en la nube:** el plano de control + volúmenes + balanceador cuestan; apagar el cluster cuando no se
+  use y medir contra el crédito.
+- **Tamaño de imágenes:** BD 4.5 GB y ETL 2.3 GB alargan despliegues; valorar multi-etapa o separar el
+  `osmnx_loader` del ETL del ciclo.
+- **Memoria en local:** cluster + imágenes pesadas sobre 7.6 GiB para Docker; el overlay local usa 1 réplica
+  y `requests` ajustados. Si hay pods `Pending`/`Evicted`, es memoria: bajar `requests` o réplicas.
 
-## Preguntas para la sesión del milestone
+## Preguntas del milestone — estado
 
-1. ¿Local primero y nube después, o ambos desde el inicio?
-2. ¿Qué proveedor de nube (si aplica) y qué presupuesto mensual?
-3. Base de datos: ¿A, B o C? ¿Se actualiza TimescaleDB antes de la nube?
-4. ¿Kustomize o Helm?
-5. ¿La API será pública (Ingress + TLS + autenticación / límites de uso) o interna?
-6. ¿Se agrega CI para construir imágenes y validar manifiestos en este milestone?
+| # | Pregunta | Respuesta |
+|---|---|---|
+| 1 | ¿Local primero o ambos? | **Local primero**, nube después |
+| 2 | ¿Proveedor y presupuesto? | **Azure (AKS)**, crédito gratuito de $100 USD; medir y apagar al no usar |
+| 3 | BD: ¿A, B o C? ¿Actualizar TimescaleDB? | **A en local (fase 1), B en nube (fase 2)**; actualización como prerrequisito de fase 2 |
+| 4 | ¿Kustomize o Helm? | **Kustomize** |
+| 5 | ¿API pública o interna? | **Interna / restringida por token** a dispositivos propios; sin store |
+| 6 | CI/CD y camino de despliegue | Abierto (fase 3) |
+| 7 | Cluster local: ¿k3d o k3s? | **k3d** sobre Docker |
+| 8 | Terraform: ¿cuál y dónde el `tfstate`? | Abierto (fase 2); backend remoto en Azure, fuera de git |
+| 9 | Prometheus: ¿Grafana del chart? ¿Pushgateway? | Abierto (fase 3) |
+| 10 | Alertas mínimas y canal | Abierto (fase 3); lista inicial en la sección Prometheus |

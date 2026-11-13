@@ -1,0 +1,45 @@
+# ============================================================================
+# overlays/local/kustomization.yaml — Settings for the LOCAL cluster
+# ============================================================================
+# An overlay starts with the base configuration and applies PATCHES: it only
+# modifies what differs in this specific environment. For a local setup, the
+# goal is to consume fewer resources (your machine has ~7.6 GiB available for
+# Docker—see KUBERNETES.md) and to simplify the configuration.
+#
+# How to use: kubectl apply -k deploy/k8s/overlays/local
+# The -k flag tells kubectl that this is a Kustomize directory.
+#
+# Changes relative to the base configuration:
+#  - The API replica count is reduced from 3 to 1 (you don't need true
+#    redundancy locally, and with only 1–2 nodes, distributing 3 replicas
+#    isn't feasible anyway).
+#  - This renders the base configuration's pod spread and PDB (Pod Disruption
+#    Budget) effectively inactive locally; however, we do NOT remove them.
+#    Keeping them allows you to practice with these features in place, and
+#    they become relevant again in the cloud overlay, where there are more
+#    replicas and nodes.
+# ============================================================================
+ 
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+ 
+resources:
+  - ../../base
+ 
+# Patch: Set the API to 1 replica locally (instead of the 3 defined in the base).
+patches:
+  - target:
+      kind: Deployment
+      name: geotracker-api
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  # Set PgBouncer to 1 replica locally as well (to save memory).
+  - target:
+      kind: Deployment
+      name: pgbouncer
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1

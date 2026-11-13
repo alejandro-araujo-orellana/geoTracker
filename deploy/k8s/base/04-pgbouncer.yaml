@@ -1,0 +1,110 @@
+# ============================================================================
+# 04-pgbouncer.yaml — Connection pooler (a dedicated Deployment)
+# ============================================================================
+# PgBouncer solves an arithmetic problem that often causes systems with replicas to crash:
+# each API replica opens its own connection pool, the ETL process opens its own, and
+# PostgreSQL creates ONE PROCESS per connection (~5–10 MB each). With 3 API replicas
+# (pool_size 10 + overflow 20 = up to 90 connections) plus the ETL, you exceed the
+# `max_connections` limit (100 by default) before even handling any real traffic.
+#
+# PgBouncer maintains a SMALL pool of actual connections to Postgres (e.g., 20)
+# and MULTIPLEXES the many incoming connections from the APIs over them. In
+# "transaction" mode, an actual connection is assigned only for the duration of
+# a single transaction, after which it returns to the pool. This allows 90 clients
+# to operate using only 20 actual connections.
+#
+# Why a Deployment instead of a StatefulSet? PgBouncer is STATELESS—it stores
+# no data; it simply routes traffic. Consequently, it can be replicated easily
+# (we use 2 replicas here) and managed via a Deployment, just like the API. This
+# also provides PgBouncer with its own redundancy: if one pod fails, the other
+# remains operational.
+#
+# A note on configuration: PgBouncer requires a `pgbouncer.ini` file and a list
+# of users. Here, I am using the Bitnami image, which is configured via
+# environment variables (a simpler approach for learning). In a production
+# environment, you would typically mount a `pgbouncer.ini` file from a
+# ConfigMap to allow for fine-grained control.
+# ============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: geotracker
+spec:
+  replicas: 2                    # two for redundancy; it is stateless and can be cloned
+  selector:
+    matchLabels:
+      app: pgbouncer
+  template:
+    metadata:
+      labels:
+        app: pgbouncer
+    spec:
+      containers:
+        - name: pgbouncer
+          # bitnami/pgbouncer:1.22.1 no longer exists on Docker Hub (Bitnami moved its
+          # free catalog to bitnamilegacy/, which receives no updates). Revisit in phase 2.
+          image: bitnamilegacy/pgbouncer:1.22.1
+          ports:
+            - containerPort: 6432
+              name: pgbouncer
+          env:
+            # Where PgBouncer forwards requests: the actual database. In a local
+            # (StatefulSet) setup, this is "geotracker-db"; with CloudNativePG,
+            # it would be "geotracker-db-rw" for write operations. To keep things
+            # simple, we point to the local database Service. (An advanced setup
+            # might run two PgBouncer instances—one for read-write and one for
+            # read-only—but for learning purposes, a single instance is sufficient.)
+            - name: POSTGRESQL_HOST
+              value: "geotracker-db"
+            - name: POSTGRESQL_PORT
+              value: "5432"
+            - name: POSTGRESQL_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: geotracker-config
+                  key: DB_USER
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            - name: PGBOUNCER_DATABASE
+              value: "vialidades_slp"
+            # Transaction mode: provides maximum multiplexing, ideal for web APIs
+            # that perform short-lived transactions. (Note: This is not suitable if
+            # you use session-level prepared statements; however, pgr_dijkstra,
+            # when used within a function, does not require them.)
+            - name: PGBOUNCER_POOL_MODE
+              value: "transaction"
+            # The number of ACTUAL connections maintained to Postgres for each
+            # user+database combination. This is the figure that protects Postgres. 
+            - name: PGBOUNCER_MAX_DB_CONNECTIONS
+              value: "20"
+            # How many clients PgBouncer can accept (set high; it’s inexpensive). 
+            - name: PGBOUNCER_MAX_CLIENT_CONN
+              value: "200"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"
+---
+# ── PgBouncer Service ──
+# This is the name that EVERYTHING communicating with the database points to: the API and the ETL
+# use DB_HOST=pgbouncer (from the ConfigMap). They never communicate directly with Postgres.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: geotracker
+spec:
+  selector:
+    app: pgbouncer
+  ports:
+    - port: 6432
+      targetPort: 6432
+      name: pgbouncer

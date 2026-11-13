@@ -1,0 +1,146 @@
+# ============================================================================
+# 05-api.yaml  —  FastAPI API (Deployment + Service + PDB)
+# ============================================================================
+# This file addresses TWO objectives:
+#   Objective 1 (redundancy): replicas + PodDisruptionBudget + spread.
+#   Objective 2 (traffic): a Service that balances traffic across replicas.
+# ============================================================================
+ 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: geotracker-api
+  namespace: geotracker
+  labels:
+    app: geotracker-api
+spec:
+  # 3 replicas: three identical copies of the API. The Service distributes
+  # traffic among them. If one fails, Kubernetes recreates it, while the
+  # other 2 continue to serve requests. This line provides your API redundancy.
+  replicas: 3
+ 
+  # Update strategy: RollingUpdate spins up new instances before
+  # shutting down old ones, ensuring there is no downtime during a new deployment.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0      # never take down a replica without a replacement ready
+      maxSurge: 1            # create 1 additional new replica at a time during the update
+  selector:
+    matchLabels:
+      app: geotracker-api
+  template:
+    metadata:
+      labels:
+        app: geotracker-api
+    spec:
+      # ── SPREAD ACROSS NODES ──
+      # Distributes the 3 replicas across DIFFERENT nodes. Without this,
+      # Kubernetes might place all 3 on the same node; if that node fails,
+      # you lose the ENTIRE API at once. "ScheduleAnyway" = attempts to distribute
+      # but does not block startup if there aren't enough nodes (useful for local
+      # environments, where you might only have 1–2 nodes). In the cloud, with more
+      # nodes available, it set this to "DoNotSchedule" for stricter enforcement.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: geotracker-api
+      containers:
+        - name: api
+          # API image (KUBERNETES.md: ~302 MB). Locally should stay
+          # charged on the cluster register.
+          image: geotracker-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          # Config from ConfigMap + Secret. envFrom pulls in all keys
+          # from the ConfigMap as environment variables at once.
+          envFrom:
+            - configMapRef:
+                name: geotracker-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            # If config.py constructs the URL, you can build it
+            # combining pieces from the ConfigMap + this password. Or inyect
+            # DATABASE_READ_URL / DATABASE_WRITE_URL already settled as env.
+            - name: DATABASE_READ_URL
+              value: "postgresql://user:$(DB_PASSWORD)@pgbouncer:6432/vialidades_slp"
+            - name: DATABASE_WRITE_URL
+              value: "postgresql://user:$(DB_PASSWORD)@pgbouncer:6432/vialidades_slp"
+ 
+          # ── PROBES (readiness/liveness en /health, tu D16) ──
+          # readiness: ¿ready to receive traffic? If fails, the Service
+          # will stop requests (but does not kill it). Key for
+          # balancing the healthy replicas.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # liveness: ¿still alive? If fails, Kubernetes reboots.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+ 
+          # requests/limits from base-line (~131 MiB en reposo). The API is
+          # light, with exception of when pgr_dijkstra loads the graph; needed to put margin.
+          resources:
+            requests:
+              memory: "192Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+# ── API Service ──
+# Provides a stable name and round-robin load balancing across healthy replicas. 
+# The Ingress (file 08) and any internal components communicate with 
+# "geotracker-api" rather than the pods directly. This layer of indirection 
+# ensures that replicas are interchangeable: the Service always routes 
+# traffic to those that are currently active.
+apiVersion: v1
+kind: Service
+metadata:
+  name: geotracker-api
+  namespace: geotracker
+spec:
+  selector:
+    app: geotracker-api
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
+---
+# ── PodDisruptionBudget ──
+# This ensures your redundancy is REAL, not just theoretical. When Kubernetes 
+# performs a VOLUNTARY operation (such as draining a node for updates or 
+# rescaling the cluster), it could potentially evict multiple pods 
+# simultaneously. The PDB instructs Kubernetes: "no matter what happens, 
+# keep AT LEAST 1 API replica available." Without this, draining a node 
+# could take down all 3 replicas at once, leaving you without an API for 
+# several minutes.
+#
+# minAvailable: 1 is the minimum. With 3 replicas, you could set this to 2 
+# for a greater safety margin.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: geotracker-api-pdb
+  namespace: geotracker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: geotracker-api

@@ -1,0 +1,57 @@
+# ============================================================================
+# 08-ingress.yaml — The gateway from outside the cluster
+# ============================================================================
+# The API Service (file 05) is only accessible FROM WITHIN the cluster. The
+# Ingress is what exposes the API to the outside world: it defines the domain,
+# routing rules (which path maps to which Service), and is where TLS—as well
+# as your required token-based access control—are configured.
+#
+# This requires an "Ingress Controller" to be installed in the cluster (e.g.,
+# nginx-ingress, Traefik, etc.). k3d comes with Traefik by default, so it
+# works out of the box in a local environment.
+#
+# YOUR ANTI-COMMERCIALIZATION CONTROL (per the TomTom/D8 requirements):
+# This is where you restrict access to "only your devices." There are two ways:
+#  - Custom token: an annotation that requires a secret header (shown
+#    conceptually below; the specific implementation depends on the controller).
+#  - IP-based restriction: an annotation that only allows traffic from
+#    specific source IPs.
+# With this, it is no longer an open, public-facing service—keeping you
+# safely within the bounds of the D8 requirements.
+# ============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: geotracker-api
+  namespace: geotracker
+  annotations:
+    # When running locally with Traefik (k3d), this is sufficient for routing. 
+    # In the cloud, you would add annotations for TLS (cert-manager) and authentication.
+    #
+    # EXAMPLE of IP-based restriction (using nginx-ingress syntax; Traefik uses 
+    # its own approach via middlewares). Uncomment and add your own IPs when 
+    # deploying to the cloud:
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "YOUR.IP.HERE/32"
+    #
+    # TOKEN-based control is best handled WITHIN your API (e.g., via a header 
+    # that your FastAPI application validates, returning a 401 if it's missing). 
+    # This approach is portable across controllers and independent of the 
+    # underlying infrastructure—it’s the simplest and most robust solution 
+    # for a "personal use" scenario.
+    kubernetes.io/ingress.class: "traefik"
+spec:
+  rules:
+    # For local development without a real domain, you can either use a 
+    # dummy hostname mapped in /etc/hosts file, or simply use 
+    # port-forwarding (which is easier—see the guide).
+    - host: geotracker.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: geotracker-api
+                port:
+                  number: 80
