@@ -8,3 +8,7 @@ __pycache__/
 dist/
 # Caché HTTP de osmnx (respuestas de Overpass); se regenera sola
 cache/
+# Secretos de Kubernetes por entorno (D27); se versiona solo secret.env.example
+deploy/k8s/**/secret.env
+# Metadatos que Windows agrega a archivos descargados
+*:Zone.Identifier

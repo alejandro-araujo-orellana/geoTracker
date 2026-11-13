@@ -35,7 +35,6 @@ geoTracker/
     │   ├── base/                # manifiestos comunes a local y nube + kustomization.yaml
     │   │   ├── 00-namespace.yaml
     │   │   ├── 01-configmap.yaml
-    │   │   ├── 02-secret.yaml            # PLANTILLA; en real se crea por comando o Sealed Secrets
     │   │   ├── 03-database-statefulset.yaml   # BD opción A (local, fase 1)
     │   │   ├── 03b-database-cnpg.yaml         # BD opción B (CloudNativePG, fase 2)
     │   │   ├── 04-pgbouncer.yaml
@@ -45,7 +44,7 @@ geoTracker/
     │   │   ├── 08-ingress.yaml
     │   │   └── kustomization.yaml
     │   └── overlays/
-    │       ├── local/           # réplicas 1, parches para la máquina de desarrollo
+    │       ├── local/           # réplicas 1, parches; Secret desde secret.env (fuera de git, D27)
     │       └── nube/            # réplicas ≥ 2, Ingress + TLS + token, StorageClass de Azure (fase 2)
     ├── terraform/               # (fase 2) infraestructura de Azure
     └── ansible/                 # (fase 2, si aplica) preparación de hosts / actualización de TimescaleDB
@@ -172,10 +171,9 @@ Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos (D5/P8)
 **Entregable:** cluster local k3d + manifiestos `base` + `overlays/local` corriendo, con:
 
 - **BD como `StatefulSet`** (opción A) con PVC: `03-database-statefulset.yaml`.
-- **Secrets** por una de dos vías, a elección:
-  - por comando: `kubectl create secret generic geotracker-secret --from-literal=...` (recomendado para no
-    tocar archivos con la API key), o
-  - desde `02-secret.yaml` con `stringData`, manteniéndolo **fuera de git** (`.gitignore`).
+- **Secrets** (D27): el `Secret` no vive en `base/`. En local lo genera Kustomize (`secretGenerator`) desde
+  `overlays/local/secret.env`, ignorado por git; se crea copiando `secret.env.example`. Claves: `DB_PASSWORD`,
+  `TOMTOM_API_KEY`, `API_TOKENS`. Tras cambiar un valor: `kubectl rollout restart deployment/geotracker-api`.
 - **Ingress** con la estructura inicial (`08-ingress.yaml`, Traefik de k3d); en local se prueba con
   `port-forward` para evitar lidiar con dominios.
 - API (`Deployment` + `Service` + `PodDisruptionBudget` + spread), PgBouncer, ETL (`CronJob`), migraciones (`Job`).
@@ -194,8 +192,8 @@ por `port-forward`. Borrar un pod de la API a mano y verlo recrearse solo (prueb
   Repuntar `DATABASE_READ_URL` a `geotracker-db-ro` y `DATABASE_WRITE_URL` a `geotracker-db-rw`.
 - **Secrets por Sealed Secrets o External Secrets**: permite versionar una versión cifrada del secreto que solo
   el cluster descifra (en local, crear por comando basta; en la nube con GitOps, no).
-- **Ingress mejorado con token**: la API valida un header secreto y rechaza con 401 lo demás; opcionalmente
-  restricción por IP. TLS con cert-manager. Esto implementa el control de acceso "solo mis dispositivos" (D8).
+- **Ingress mejorado con token**: la validación del token en la API ya existe (D26, header `X-API-Key`);
+  en la nube falta TLS (sin TLS el token viaja en claro) y, opcionalmente, restricción por IP. TLS con cert-manager. Esto implementa el control de acceso "solo mis dispositivos" (D8).
 - **Infraestructura con Terraform** (`deploy/terraform/`): cluster AKS, red, registro de imágenes, backend
   remoto para el `tfstate` (nunca en git, nunca con secretos en claro).
 - **Prerrequisito:** actualización de TimescaleDB como playbook de Ansible (respaldo → actualización →

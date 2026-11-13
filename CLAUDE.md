@@ -41,10 +41,12 @@ Servicios (Compose v5, `restart: unless-stopped`, credenciales en `.env` — D17
 
 ### API
 ```bash
-curl 'localhost:8000/api/v1/rutas?origen=22.1497,-100.9739&destino=22.1460,-101.0130'   # &detalle=true
+curl -H "X-API-Key: $TOKEN" 'localhost:8000/api/v1/rutas?origen=22.1497,-100.9739&destino=22.1460,-101.0130'   # &detalle=true
 ```
 Respuesta: distancia, duración con tráfico y a flujo libre, demora, vigencia del tráfico, calles en orden y
 geometría GeoJSON. 422 si la coordenada está a > 300 m de la red o el formato es inválido; 404 si no hay ruta.
+`/api/v1/*` exige `X-API-Key` con un token de `API_TOKENS` (en `.env`; 401 si falta). Sin tokens la API no arranca (D26).
+En Kubernetes los secretos van en `deploy/k8s/overlays/local/secret.env` (fuera de git, D27).
 
 ### Tests
 Los tests importan módulos por nombre simple; `PYTHONPATH` debe apuntar a `src/`:

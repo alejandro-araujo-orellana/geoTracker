@@ -68,6 +68,13 @@ spec:
                 secretKeyRef:
                   name: geotracker-secret
                   key: DB_PASSWORD
+            # Access tokens (D26): /api/v1 requires the X-API-Key header. Without this
+            # key the API refuses to start (fail closed). /health stays open for probes.
+            - name: API_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: API_TOKENS
             # If config.py constructs the URL, you can build it
             # combining pieces from the ConfigMap + this password. Or inyect
             # DATABASE_READ_URL / DATABASE_WRITE_URL already settled as env.

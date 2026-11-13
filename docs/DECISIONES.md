@@ -218,8 +218,7 @@ opcionalmente, restricción por IP y TLS (cert-manager) en el Ingress.
 **Por qué:** mantiene el proyecto dentro de D8 (datos derivados de TomTom para uso propio/investigación, no
 redistribución pública). El token en la aplicación es portable entre controladores de Ingress (Traefik en local,
 el que se use en AKS), a diferencia de las anotaciones de autenticación de cada controlador.
-**Estado:** **no implementado.** `services/api` aún no valida ningún token y `08-ingress.yaml` solo enruta; se
-implementa en la fase 2, con el token como clave nueva del `Secret`.
+**Estado:** implementado antes de la fase 2 para probarlo en local y en Compose — ver D26. Falta TLS en la nube.
 **Dónde:** `08-ingress.yaml` en el commit `8461992`; `docs/KUBERNETES.md` › Fase 2.
 
 ## D24 — ETL en modo un ciclo (`--una-vez`) para el CronJob (2026-11-12)
@@ -243,6 +242,35 @@ problema porque un volumen nombrado de Docker copia el dueño del directorio de 
 fijada sobre un directorio root:0777 (como `local-path` de k3d): montaje en `PGDATA` → falla; montaje en el padre →
 arranca. En Azure Disk el disco llega root:0755 con `lost+found`, así que además hace falta `fsGroup` para que
 `postgres` pueda crear `data/`. `local-path` ignora `fsGroup` (es hostPath), pero su 0777 basta.
+
+## D26 — Token de acceso en la API: `X-API-Key` (2026-11-12)
+**Decisión:** todo `/api/v1/*` exige el header `X-API-Key` con uno de los tokens de `API_TOKENS` (lista separada por
+coma, uno por dispositivo); si falta o no coincide → 401 con `WWW-Authenticate: ApiKey`. `/health` y `/docs` quedan
+abiertos. Implementa D23 desde ahora, en Compose y en Kubernetes.
+**Detalles:**
+- **Falla cerrada:** sin tokens, o con alguno de < 32 caracteres, la configuración no se construye y la API no
+  arranca. Solo `API_AUTH_DESACTIVADA=true` la deja abierta (desarrollo; lo avisa en el log).
+- Comparación con `secrets.compare_digest` contra **todos** los tokens (sin cortar en el primero que coincide).
+  El token recibido nunca se registra.
+- La dependencia va en `include_router(..., dependencies=[...])`: cualquier router nuevo bajo `/api/v1` queda
+  protegido sin acordarse de ponerla. `APIKeyHeader` hace que `/docs` muestre el botón "Authorize".
+- `/health` abierto porque lo llaman los probes de Kubernetes y el healthcheck de Compose, que no mandan token.
+  `/docs` solo expone el esquema, no datos; puede cerrarse en la nube si se quiere.
+- Revocar un dispositivo = quitar su token de la lista y reiniciar la API.
+**Verificado:** 11 tests nuevos (`services/api/tests/test_seguridad.py`, sin BD) + los 12 de rutas con el header;
+en vivo en Compose: sin token 401, token incorrecto 401, correcto 200, `/health` 200.
+**Uso:** `curl -H "X-API-Key: $TOKEN" 'localhost:8000/api/v1/rutas?...'` (el token está en `.env`).
+
+## D27 — Secretos de Kubernetes fuera de `base/`: `secretGenerator` desde un archivo no versionado (2026-11-12)
+**Decisión:** se elimina `base/02-secret.yaml`. En local, el `Secret` `geotracker-secret` lo genera Kustomize desde
+`overlays/local/secret.env` (en `.gitignore`; plantilla versionada `secret.env.example`), con
+`disableNameSuffixHash` para conservar el nombre fijo. En la nube lo aportará Sealed/External Secrets (fase 2).
+**Por qué:** un `Secret` en `base/` solo tenía dos salidas malas: con valores vacíos, cada `kubectl apply -k`
+pisaba el secreto real creado por comando; con los valores reales, el archivo (ya versionado en `8461992`) acababa
+en git y en GitHub. El generador lee un archivo que git no ve, y el `apply -k` sigue siendo un solo comando.
+**Consecuencias:** el overlay declara su propio `namespace` (el de la base no alcanza a lo que genera el overlay).
+Con el nombre fijo, cambiar un valor no reinicia los pods: `kubectl rollout restart`. Los valores que estaban en
+`02-secret.yaml` se movieron a `secret.env` y se verificó que coinciden con `.env` y con el `Secret` renderizado.
 
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con

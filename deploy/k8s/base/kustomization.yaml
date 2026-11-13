@@ -23,7 +23,10 @@ namespace: geotracker
 resources:
   - 00-namespace.yaml
   - 01-configmap.yaml
-  - 02-secret.yaml              # remember: in a real-world scenario, create this via kubectl, not here
+  # The Secret (geotracker-secret) is NOT part of the base: each overlay provides it
+  # (local: secretGenerator from an untracked secret.env; cloud: Sealed/External
+  # Secrets). A Secret file here would either leak values into git or overwrite the
+  # real Secret with empty strings on every `apply -k`. D27.
   - 03-database-statefulset.yaml   # option A (local). For option B: 03b
   - 04-pgbouncer.yaml
   - 05-api.yaml

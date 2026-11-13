@@ -7,12 +7,18 @@ endpoint /health para que el load balancer / orquestador sepa si esta
 instancia está sana.
 """
 
-from fastapi import FastAPI
+import logging
+
+from fastapi import Depends, FastAPI
 from app.api.v1 import api_router_v1
 from app.core.config import get_settings
 from app.core.database import verificar_conexiones
+from app.core.seguridad import verificar_token
 
+# Falla aquí (y el contenedor no arranca) si API_TOKENS falta o es débil: D26.
 settings = get_settings()
+if settings.api_auth_desactivada:
+    logging.getLogger(__name__).warning("API_AUTH_DESACTIVADA=true: /api/v1 queda SIN token (solo desarrollo).")
 
 app = FastAPI(
     title=settings.app_name,
@@ -20,7 +26,8 @@ app = FastAPI(
     #doc interactiva en /docs swagger y /redoc
 )
 
-app.include_router(api_router_v1, prefix=settings.api_v1_prefix)
+# Todo /api/v1 exige X-API-Key; /health y /docs quedan abiertos.
+app.include_router(api_router_v1, prefix=settings.api_v1_prefix, dependencies=[Depends(verificar_token)])
 
 
 @app.get("/health", tags=["infra"], summary="Estado de la instancia")

@@ -80,7 +80,7 @@ def cliente(engine):
     with engine.begin() as c:
         c.execute(text("DELETE FROM trafico_calles; DELETE FROM fact_flujo_aristas;"))
     app.dependency_overrides[get_conexion] = _conexion
-    yield TestClient(app)
+    yield TestClient(app, headers={"X-API-Key": os.environ["API_TOKENS"].split(",")[0].strip()})
     app.dependency_overrides.clear()
 
 
