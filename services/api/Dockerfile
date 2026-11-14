@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 
-# uvicorn con múltiples workers para aprovechar varios cores.
-# En producción, cada réplica del contenedor corre esto detrás del gateway.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Un solo worker por contenedor (D32): se escala con réplicas del Deployment, no con
+# procesos. Con varios workers las métricas de /metrics quedarían repartidas entre procesos
+# y cada scrape de Prometheus vería solo uno. Las rutas son `def` (threadpool), así que un
+# worker atiende varias peticiones a la vez mientras esperan a la BD.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

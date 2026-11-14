@@ -83,20 +83,24 @@ spec:
             - name: DATABASE_WRITE_URL
               value: "postgresql://user:$(DB_PASSWORD)@pgbouncer:6432/vialidades_slp"
  
-          # ── PROBES (readiness/liveness en /health, tu D16) ──
-          # readiness: ¿ready to receive traffic? If fails, the Service
-          # will stop requests (but does not kill it). Key for
-          # balancing the healthy replicas.
+          # ── PROBES (D32) ──
+          # Probes only look at the HTTP status code. /health always answers 200
+          # (even "degraded"), so it is NOT used here.
+          # readiness: ready to receive traffic? /health/ready checks the DB and
+          # answers 503 if it fails: the Service stops sending requests to this
+          # replica (it is not killed) until the DB is back.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
-          # liveness: ¿still alive? If fails, Kubernetes reboots.
+          # liveness: still alive? If it fails, Kubernetes restarts the container.
+          # /health/live does NOT touch the DB: a DB outage must not restart every
+          # API replica (a restart cannot fix the DB).
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 20

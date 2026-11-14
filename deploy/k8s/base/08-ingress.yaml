@@ -44,9 +44,27 @@ spec:
     # port-forwarding (which is easier—see the guide).
     - host: geotracker.local
       http:
+        # Only what clients need is published (D32): /api/v1 (token-protected) and the
+        # interactive docs. /metrics and /health/* stay internal: Prometheus and the
+        # kubelet reach them through the Service / pod, never through the Ingress.
+        # A catch-all "/" would publish /metrics, which has no token.
         paths:
-          - path: /
+          - path: /api
             pathType: Prefix
+            backend:
+              service:
+                name: geotracker-api
+                port:
+                  number: 80
+          - path: /docs
+            pathType: Exact
+            backend:
+              service:
+                name: geotracker-api
+                port:
+                  number: 80
+          - path: /openapi.json
+            pathType: Exact
             backend:
               service:
                 name: geotracker-api

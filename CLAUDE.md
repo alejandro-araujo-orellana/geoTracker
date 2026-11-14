@@ -46,6 +46,8 @@ curl -H "X-API-Key: $TOKEN" 'localhost:8000/api/v1/rutas?origen=22.1497,-100.973
 Respuesta: distancia, duración con tráfico y a flujo libre, demora, vigencia del tráfico, calles en orden y
 geometría GeoJSON. 422 si la coordenada está a > 300 m de la red o el formato es inválido; 404 si no hay ruta.
 `/api/v1/*` exige `X-API-Key` con un token de `API_TOKENS` (en `.env`; 401 si falta). Sin tokens la API no arranca (D26).
+Sin token: `/health/live` (liveness, no toca la BD), `/health/ready` (readiness, 503 si la BD falla), `/health`
+(informativo, siempre 200) y `/metrics` (Prometheus). El Ingress solo publica `/api`, `/docs` y `/openapi.json` (D32).
 En Kubernetes los secretos van en `deploy/k8s/overlays/local/secret.env` (fuera de git, D27).
 
 ### Tests
@@ -157,5 +159,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos; desde 2026-11-13 17:15 UTC corre como `CronJob`
    en k3d (D29) y el de Compose está apagado: el histórico previo sigue en la BD de Compose (y Grafana también) (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
-3. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
-4. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).
+3. Observabilidad (fase 3, D31): `/metrics` y sondas listas en la API (D32). Sigue: exportar dashboards de Compose,
+   `kube-prometheus-stack` + Grafana del chart, `ejecuciones_etl`, rol `grafana_ro`, alertas.
+4. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
+5. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).

@@ -97,8 +97,8 @@ Estas cierran las preguntas del final del documento y se registran en `DECISIONE
 - **Cluster local: k3d** (pregunta 7): sobre Docker, sin VMs; Terraform/Ansible se reservan para la nube.
 
 Siguen **abiertas** para fases posteriores: CI/CD Jenkins vs GitHub Actions (pregunta 6), detalles de Terraform
-y `tfstate` remoto (pregunta 8), Grafana del chart vs el actual y Pushgateway (pregunta 9), y el canal de
-alertas (pregunta 10). Se deciden en las fases 3 y 5.
+y `tfstate` remoto (pregunta 8) y el canal de alertas (pregunta 10). Grafana y Pushgateway (pregunta 9) y el
+motor de alertas se decidieron en D31.
 
 ## Línea base medida (Compose, 2026-11-09)
 
@@ -120,7 +120,7 @@ Crecimiento de datos estimado (a verificar): `trafico_calles` ~6.5 M filas/día 
 
 | Componente | Recurso de Kubernetes | Archivo | Notas |
 |---|---|---|---|
-| API | `Deployment` (3 réplicas en base, 1 en local) + `Service` + `PodDisruptionBudget` | `05-api.yaml` | Readiness/liveness en `/health`. Spread entre nodos. Candidata a HPA |
+| API | `Deployment` (3 réplicas en base, 1 en local) + `Service` + `PodDisruptionBudget` | `05-api.yaml` | Readiness en `/health/ready`, liveness en `/health/live` (D32). Spread entre nodos. Candidata a HPA |
 | Pooler | `Deployment` (2 réplicas) + `Service` | `04-pgbouncer.yaml` | Todo el tráfico a la BD pasa por aquí (puerto 6432) |
 | ETL | `CronJob` `*/15`, `Forbid`, `timeZone: America/Mexico_City` | `06-etl-cronjob.yaml` | Reemplaza el `while True`. `Forbid` = nunca cuota doble |
 | Migraciones | `Job` explícito (no initContainer) | `07-migrations-job.yaml` | Corre una vez antes de la app; evita carreras entre réplicas |
@@ -161,7 +161,8 @@ Recordar: TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos (D5/P8)
 2. **Migraciones como comando aparte** (`python src/migrate.py`), fuera del arranque del ETL. — **requerido por
    `07-migrations-job.yaml`**
 3. **Grafana como código**: datasource y dashboards en provisioning versionado. — fase 3
-4. **Sondas**: el ETL como `CronJob` no necesita liveness; la API ya tiene `/health`.
+4. **Sondas**: el ETL como `CronJob` no necesita liveness. La API usa `/health/live` y `/health/ready` — **hecho
+   (D32)**: `/health` responde 200 aunque la BD falle, así que no sirve como sonda.
 5. **Apagado ordenado (SIGTERM)** en el ETL para no cortar un ciclo a la mitad (aunque es idempotente).
 6. **Rendimiento de la API con réplicas**: `pgr_dijkstra` carga el grafo completo por petición; con más tráfico,
    evaluar `pgr_aStar`, limitar el grafo por bbox origen-destino, o caché de rutas. Es el techo real de escala,
@@ -282,18 +283,20 @@ administren lo mismo (cada una "corrige" el estado de la otra: *drift*).
   opción C (descartada), así que su peso es menor.
 - **Secretos:** Ansible Vault o variables de entorno; nada en claro en el repo.
 
-### Prometheus (fase 3)
+### Prometheus (fase 3) — decidido en D31 y D32
 
-- **Instalación:** chart `kube-prometheus-stack`.
-- **Grafana único:** decidir entre el del chart y el actual, con dos datasources (TimescaleDB para negocio,
-  Prometheus para operación).
+- **Instalación:** chart `kube-prometheus-stack` por Helm con `values` versionados en `deploy/k8s/platform/`.
+- **Grafana único: el del chart**, con dos datasources (TimescaleDB para negocio con el rol `grafana_ro`,
+  Prometheus para operación) y dashboards como ConfigMaps. Sin Pushgateway.
+- **Alertas:** un solo juego de reglas de Grafana provisionadas. Notifica Grafana Alerting en local y el
+  Alertmanager del chart en la nube (D31).
 - **Qué medir:**
 
   | Componente | Métricas | Cómo |
   |---|---|---|
-  | ETL | Ciclo exitoso/fallido, duración, aristas medidas, tiles | El `CronJob` vive ~12 s: Pushgateway al final del ciclo, o `kube-state-metrics` + consultas a la BD |
-  | Cuotas TomTom | Consumo del mes vs cuota, 403 | Ya en `consumo_api`: `postgres_exporter` o Pushgateway |
-  | API | Latencia, errores, peticiones | `prometheus-fastapi-instrumentator` (`/metrics`) + `ServiceMonitor` |
+  | ETL | Ciclo exitoso/fallido, duración, aristas medidas, tiles | `kube-state-metrics` (último éxito del `CronJob`) + tabla `ejecuciones_etl` en la BD (pendiente) |
+  | Cuotas TomTom | Consumo del mes vs cuota, 403 | Ya en `consumo_api`: regla de Grafana sobre SQL |
+  | API | Latencia, errores, peticiones | **Hecho (D32):** `/metrics` con `prometheus-fastapi-instrumentator`; falta el `ServiceMonitor` (con el stack) |
   | BD | Conexiones, tamaño, locks, chunks/compresión | `postgres_exporter` |
   | Cluster | CPU/memoria de pods, reinicios, PVCs | Incluido en el chart |
 
@@ -352,5 +355,5 @@ partir los datos entre dos BD. (Fase 4.)
 | 6 | CI/CD y camino de despliegue | Abierto (fase 3) |
 | 7 | Cluster local: ¿k3d o k3s? | **k3d** sobre Docker |
 | 8 | Terraform: ¿cuál y dónde el `tfstate`? | Abierto (fase 2); backend remoto en Azure, fuera de git |
-| 9 | Prometheus: ¿Grafana del chart? ¿Pushgateway? | Abierto (fase 3) |
-| 10 | Alertas mínimas y canal | Abierto (fase 3); lista inicial en la sección Prometheus |
+| 9 | Prometheus: ¿Grafana del chart? ¿Pushgateway? | **Grafana del chart, sin Pushgateway** (D31) |
+| 10 | Alertas mínimas y canal | **Reglas de Grafana; Grafana Alerting en local, Alertmanager en la nube** (D31). Canal: abierto |

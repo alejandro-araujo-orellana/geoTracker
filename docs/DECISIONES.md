@@ -336,6 +336,63 @@ Usa internals de osmnx fijados por versión (`osmnx==2.1.0`); al subir osmnx hay
 `emptyDir` y necesita salida a internet hacia el servidor del extracto. Actualizar la red = borrar el `Job` y
 volver a `apply -k`. Tests: `tests/test_fuente_pbf.py`.
 
+## D31 — Observabilidad: Prometheus para operación, TimescaleDB para negocio, Grafana único (2026-11-13)
+**Contexto:** fase 3 de `KUBERNETES.md`. Grafana sigue en Compose leyendo la BD de Compose (congelada desde el corte de
+D29), sin provisioning (dashboards y datasource solo existen en el volumen `geotracker_grafana_data`), y no hay
+métricas ni alertas: el 2026-11-13 el ETL estuvo ~4 h sin correr (equipo apagado) y nada lo avisó.
+**Decisiones** (cierran las preguntas 9 y 10 de `KUBERNETES.md`):
+- **Dos fuentes, separadas por tipo de dato.** Negocio (congestión, mapa de calor, ETAs) se queda en TimescaleDB;
+  operación (latencia y errores de la API, éxito del ETL, reinicios, disco, cuota) va a Prometheus. La congestión
+  **no** se exporta a Prometheus: ~67 k `osm_id` serían ~67 k series y el histórico ya vive en TimescaleDB.
+- **`kube-prometheus-stack` por Helm con `values` versionados** (`deploy/k8s/platform/`), reducido en local (una
+  réplica, retención 7 días). No contradice D20: Kustomize sigue a cargo de las apps de geoTracker; el chart es
+  plataforma, como Traefik. En la nube lo instala Terraform (D18).
+- **Grafana único: el del chart**, con datasources TimescaleDB + Prometheus y dashboards como ConfigMaps (sidecar
+  de provisioning). Los dashboards de Compose se exportan a JSON y se versionan. El de Compose se retira después
+  de la fase 4 (migración del histórico).
+- **Sin Pushgateway.** El ETL vive ~20 s y su estado ya va a la BD (D7). Salud del job: `kube-state-metrics`
+  (`kube_cronjob_status_last_successful_time`, incluido en el chart). Detalle del ciclo: tabla `ejecuciones_etl`
+  (una fila por ciclo), que se grafica desde TimescaleDB y sobrevive a la retención de Prometheus.
+- **Grafana entra a la BD con un rol de solo lectura** (`grafana_ro`), directo a `geotracker-db:5432`: no con el
+  usuario dueño del esquema, y no por PgBouncer en modo transacción (prepared statements).
+- **Alertas: un solo juego de reglas, motor de notificación por entorno.** Las reglas se escriben una vez como
+  reglas de Grafana provisionadas (pueden consultar Prometheus *y* SQL: cuota en `consumo_api`, frescura de
+  `trafico_calles`). Local: notifica el Alertmanager interno de Grafana (Grafana Alerting); el Alertmanager del
+  chart va desactivado para ahorrar memoria. Nube (AKS): Alertmanager del chart activo; Grafana le envía sus
+  alertas como Alertmanager externo, y ahí llegan también las reglas por defecto del chart (nodos, PVC,
+  reinicios). La diferencia entre entornos queda en los overlays/`values` (`alertmanager.enabled` y el destino de
+  las alertas de Grafana), no en las reglas.
+**Por qué no dos juegos de reglas** (Grafana en local, `PrometheusRule` en la nube): divergen con el tiempo, y lo
+que se prueba en local deja de ser lo que corre en la nube. Además, Prometheus no puede consultar SQL: las
+alertas de cuota y frescura exigirían un exportador extra solo para la nube.
+**Pendiente de verificar al escribir `overlays/nube`:** el envío de alertas de Grafana a un Alertmanager externo
+(datasource de tipo Alertmanager + elección de Alertmanager en la configuración de Grafana) con la versión de
+Grafana que traiga el chart en ese momento.
+
+## D32 — Sondas separadas (`/health/live`, `/health/ready`) y `/metrics` en la API (2026-11-13)
+**Contexto:** las sondas de Kubernetes solo miran el código HTTP, y `/health` responde **200 siempre**, también con
+`"status": "degraded"`: las dos sondas apuntaban ahí y nunca detectaban una BD caída.
+**Decisiones:**
+- **`/health/live`** (liveness) no toca la BD: si la BD cae, reiniciar la API no arregla nada y reiniciaría todas
+  las réplicas a la vez. **`/health/ready`** (readiness) consulta la BD y responde **503** si falla: el Service saca
+  la réplica de la rotación sin matarla. `/health` se conserva igual (informativo). El healthcheck de Compose pasa
+  a `/health/ready`.
+- **`/metrics`** con `prometheus-fastapi-instrumentator==7.1.0` + `prometheus-client==0.21.1` (la 8.x exige
+  Starlette ≥ 1.0, incompatible con `fastapi==0.115.6`). Sin token, igual que `/health`. Etiqueta por plantilla de
+  ruta (nunca por la URL con su query) y excluye las sondas y el propio scrape.
+- **Un worker de uvicorn por contenedor** (antes 2): con varios procesos cada uno tiene sus contadores y cada
+  scrape vería uno al azar. Se escala con réplicas del Deployment; las rutas son `def` (threadpool), así que un
+  worker atiende varias peticiones mientras esperan a la BD.
+- **El Ingress publica solo `/api`, `/docs` y `/openapi.json`** (antes `/` completo). `/metrics` y `/health/*`
+  quedan internos: Prometheus y el kubelet llegan por el Service y el pod.
+- El `ServiceMonitor` se agrega con el stack (D31): su CRD aún no existe en el cluster.
+**Verificado (k3d, 2026-11-13):** tests de la API 29/29 (`tests/test_observabilidad.py` nuevo; los de ruteo contra BD
+real). Por el Service: `/health/live`, `/health/ready`, `/metrics` y la ruta con token → 200, y `http_requests_total`
+etiquetado `handler="/api/v1/rutas"`. Por el Ingress: `/metrics`, `/health`, `/health/ready` → 404; `/docs`,
+`/openapi.json` y la ruta con token → 200; sin token → 401. Con PgBouncer escalado a 0: `/health/ready` 503,
+`/health/live` 200, la réplica pasa a `notReady` en los endpoints y **0 reinicios**; al restaurarlo vuelve a
+`ready` sola.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
