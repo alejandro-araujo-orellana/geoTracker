@@ -36,6 +36,9 @@ DB_URL: str = (
     f"@{os.environ.get('DB_HOST', 'timescaledb')}:{os.environ.get('DB_PORT', '5432')}"
     f"/{os.environ['DB_NAME']}"
 )
+# Contraseña del rol de solo lectura de Grafana (D33). Opcional: sin ella, migrate.py deja
+# el rol grafana_ro sin login.
+GRAFANA_DB_PASSWORD: str = os.environ.get("GRAFANA_DB_PASSWORD", "")
 
 # ---------------------------------------------------------------------------
 # Calles monitoreadas  →  identificador : coordenadas TomTom

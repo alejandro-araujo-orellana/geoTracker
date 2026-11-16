@@ -10,5 +10,6 @@ dist/
 cache/
 # Secretos de Kubernetes por entorno (D27); se versiona solo secret.env.example
 deploy/k8s/**/secret.env
+deploy/k8s/**/grafana.env
 # Metadatos que Windows agrega a archivos descargados
 *:Zone.Identifier

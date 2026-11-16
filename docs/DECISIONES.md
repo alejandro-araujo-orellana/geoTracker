@@ -393,6 +393,52 @@ etiquetado `handler="/api/v1/rutas"`. Por el Ingress: `/metrics`, `/health`, `/h
 `/health/live` 200, la réplica pasa a `notReady` en los endpoints y **0 reinicios**; al restaurarlo vuelve a
 `ready` sola.
 
+## D33 — Grafana en el cluster: stack instalado, rol `grafana_ro` y dashboards como código (2026-11-14)
+**Contexto:** implementación de D31 en k3d. El dashboard exportado del Grafana de Compose ("HeatMap SLP Traffic")
+viene en el formato nuevo v2 (`dashboard.grafana.app/v2`) y apunta a un datasource que solo existe en Compose.
+**Decisiones:**
+- **`kube-prometheus-stack` 93.3.0** (`deploy/k8s/platform/kube-prometheus-stack/`): `values.yaml` común +
+  `values-local.yaml`. Release `kps` en el namespace `monitoring`. Helm corre desde la imagen `alpine/helm:3.17.3`
+  (nada instalado en el host). En local: sin Alertmanager, sin los objetivos de control plane que k3s lleva
+  embebidos (etcd, scheduler, controller-manager, kube-proxy, siempre "down"), Prometheus con 7 días en un PVC de
+  5 Gi.
+- **Grafana fijado en `grafana/grafana-oss:13.0.2`** (el chart trae 13.3.1): es la versión de la que salió el
+  dashboard v2 y con la que se comprobó que el provisioning de archivos lo carga, y la misma imagen que Compose.
+  Subirla es una decisión explícita, revisando los dashboards.
+- **Rol `grafana_ro`** (migración 013): solo `SELECT`, privilegios por defecto para tablas futuras, `statement_timeout`
+  30 s y 10 conexiones como máximo. La migración lo crea sin login. La contraseña no va en git: `migrate.py` la asigna
+  si recibe `GRAFANA_DB_PASSWORD`, que viene del Secret. El datasource va directo a `geotracker-db:5432`, no por
+  PgBouncer.
+- **Secretos:** `overlays/local/grafana.env` (fuera de git; plantilla `grafana.env.example`) genera `grafana-secret`
+  en los dos namespaces desde **un solo archivo**: la contraseña que asigna el Job de migraciones (`geotracker`) y la
+  que usa Grafana (`monitoring`) no pueden desalinearse. El overlay deja de declarar `namespace:` global (abarca
+  dos namespaces); cada generador declara el suyo. Se verificó que el render de los objetos existentes no cambia.
+- **Dashboards como código:** `deploy/k8s/platform/kustomization.yaml` genera un ConfigMap por JSON, con la etiqueta
+  `grafana_dashboard=1` y la carpeta "geoTracker", sin sufijo hash (con hash, `apply` dejaría la versión anterior y
+  Grafana vería el mismo uid dos veces). Ahí vive también el `ServiceMonitor` de la API. El overlay incluye
+  `../../platform`.
+- **Cambios al dashboard exportado** (se conserva el formato v2 y el uid `adrdrr6`): las tres consultas apuntan al
+  datasource provisionado `timescaledb`; se quitan los metadatos de la instancia de Compose; los mapas se centran
+  en SLP. **El panel 3 ("mapa de calor") leía `trafico_inferido` (`IDW_GRID`)**, la tabla legada de P10, que ya no
+  se escribe y no existe en el cluster. Ese mapa en Compose muestra datos viejos desde mucho antes del corte de D29.
+  Ahora lee el último ciclo de `trafico_calles`, agregado en celdas de 0.002° (~200 m): 67 464 calles → ~3.3 k
+  puntos, ~0.33 s.
+**Trampa operativa:** `k3d image import` con **dos imágenes en el mismo comando** reportó éxito y dejó en los nodos
+la `geotracker-etl` anterior: el Job de migraciones corrió sin la 013 ("Esquema al día"). Importada sola, sí se
+reemplazó. Importar una imagen por comando y comprobar la fecha con
+`docker exec k3d-geotracker-agent-0 crictl inspecti docker.io/library/<imagen>`.
+**Verificado (k3d, 2026-11-14):**
+- **Tests:** ETL 164/164, con `tests/test_rol_grafana_db.py` nuevo contra BD real (lee hypertables, no escribe, lee
+  tablas futuras, rotación de contraseña, corte a los 30 s); API 29/29.
+- **Grafana 13.0.2:** datasources TimescaleDB (como `grafana_ro`) y Prometheus pasan el health check. El dashboard
+  aparece en la carpeta geoTracker y sus tres consultas, ejecutadas por Grafana, devuelven 19, 207 y 3 333 filas.
+  Un `DELETE` como `grafana_ro` → `permission denied`.
+- **Prometheus:** `up{job="geotracker-api"} = 1`, `http_requests_total` por ruta, y
+  `kube_cronjob_status_last_successful_time` del ETL disponible: base de la alerta "ETL sin correr".
+- **Memoria del stack:** Grafana ~330 MiB, Prometheus ~285 MiB y el resto <70 MiB.
+**Pendiente:** Grafana registra una vez al cargar un `level=error` interno ("[SHOULD NOT HAPPEN] failed to update
+managedFields") sobre el esquema v2; el dashboard funciona. Revisar al subir de versión.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

@@ -1,5 +1,9 @@
 # Kubernetes — plan e implementación del milestone
 
+> **Actualización 2026-11-14:** fase 3 en curso en k3d. Ya están Prometheus + Grafana (`kube-prometheus-stack`), los
+> dashboards como código, el rol `grafana_ro` y la API scrapeada (D31–D33); ver "Observabilidad: operación".
+> Faltan `ejecuciones_etl`, las reglas de alerta y el histórico (fase 4).
+>
 > **Actualización 2026-11-13:** fase 1 aplicada en k3d (D28, D29): BD, PgBouncer, API con token, migraciones y
 > red OSM cargadas; el ETL corre como `CronJob` y el de Compose está apagado. Falta el histórico y Grafana (fase 4).
 >
@@ -47,8 +51,13 @@ geoTracker/
     │   │   ├── 08-ingress.yaml
     │   │   ├── 09-osm-loader-job.yaml     # red OSM desde extracto .osm.pbf (D29, D30)
     │   │   └── kustomization.yaml
+    │   ├── platform/            # observabilidad (D31–D33)
+    │   │   ├── kube-prometheus-stack/   # values.yaml + values-local.yaml del chart (Helm)
+    │   │   ├── grafana/dashboards/      # dashboards JSON → ConfigMaps
+    │   │   ├── servicemonitor-api.yaml
+    │   │   └── kustomization.yaml       # lo incluyen los overlays
     │   └── overlays/
-    │       ├── local/           # réplicas 1, parches; Secret desde secret.env (fuera de git, D27)
+    │       ├── local/           # réplicas 1, parches; Secrets desde secret.env y grafana.env (fuera de git, D27, D33)
     │       └── nube/            # réplicas ≥ 2, Ingress + TLS + token, StorageClass de Azure (fase 2)
     ├── terraform/               # (fase 2) infraestructura de Azure
     └── ansible/                 # (fase 2, si aplica) preparación de hosts / actualización de TimescaleDB
@@ -128,7 +137,8 @@ Crecimiento de datos estimado (a verificar): `trafico_calles` ~6.5 M filas/día 
 | `.env` | `Secret` + `ConfigMap` | `01` / `02` | Config no sensible en ConfigMap; credenciales en Secret |
 | Entrada | `Ingress` | `08-ingress.yaml` | Traefik en local; TLS + token en la fase 2 |
 | Carga de red OSM | `Job` (`osmnx_loader.py`) | `09-osm-loader-job.yaml` | Espera migraciones ≥ 005. Lee un extracto `.osm.pbf` (`OSM_PBF_URL`), no Overpass (D30); necesita salida a internet |
-| Grafana | `Deployment` + PVC, provisioning | (pendiente, fase 3) | Datasource y dashboards como código |
+| Grafana + Prometheus | Chart `kube-prometheus-stack` (Helm), namespace `monitoring` | `platform/kube-prometheus-stack/` | Grafana 13.0.2 con PVC; datasources TimescaleDB (`grafana_ro`) y Prometheus (D33) |
+| Dashboards + ServiceMonitor | `ConfigMap` por dashboard + `ServiceMonitor` | `platform/kustomization.yaml` | Incluido por el overlay; requiere los CRDs del chart |
 | Respaldos | `CronJob` con `pg_dump` | (pendiente) | Hoy manuales; en fase 2 con el operador |
 
 ## Base de datos — decisión tomada (A → B)
@@ -294,9 +304,9 @@ administren lo mismo (cada una "corrige" el estado de la otra: *drift*).
 
   | Componente | Métricas | Cómo |
   |---|---|---|
-  | ETL | Ciclo exitoso/fallido, duración, aristas medidas, tiles | `kube-state-metrics` (último éxito del `CronJob`) + tabla `ejecuciones_etl` en la BD (pendiente) |
+  | ETL | Ciclo exitoso/fallido, duración, aristas medidas, tiles | `kube-state-metrics` (último éxito del `CronJob`, **disponible**) + tabla `ejecuciones_etl` en la BD (pendiente) |
   | Cuotas TomTom | Consumo del mes vs cuota, 403 | Ya en `consumo_api`: regla de Grafana sobre SQL |
-  | API | Latencia, errores, peticiones | **Hecho (D32):** `/metrics` con `prometheus-fastapi-instrumentator`; falta el `ServiceMonitor` (con el stack) |
+  | API | Latencia, errores, peticiones | **Hecho (D32, D33):** `/metrics` con `prometheus-fastapi-instrumentator` + `ServiceMonitor` |
   | BD | Conexiones, tamaño, locks, chunks/compresión | `postgres_exporter` |
   | Cluster | CPU/memoria de pods, reinicios, PVCs | Incluido en el chart |
 
@@ -304,6 +314,37 @@ administren lo mismo (cada una "corrige" el estado de la otra: *drift*).
   cualquier 403 de TomTom; API no sana o p95 de `/rutas` > 2 s; PVC de la BD > 80 %.
 - **Costo:** el stack pide ~1–2 GB de RAM; en local, configuración reducida (sin réplicas, retención corta).
 - **Retención:** corta (7–15 días) para operación; el histórico de tráfico sigue en TimescaleDB.
+
+### Observabilidad: operación (D33)
+
+Orden en un cluster nuevo: **primero el chart** (crea el namespace `monitoring` y los CRDs como `ServiceMonitor`),
+**después** `apply -k`. Mientras no exista `grafana-secret`, el pod de Grafana espera en `CreateContainerConfigError`
+y arranca solo en cuanto el `apply -k` lo crea.
+
+```bash
+# 0. Secretos (una vez): cp deploy/k8s/overlays/local/grafana.env.example deploy/k8s/overlays/local/grafana.env y llenar
+# 1. Chart (Helm desde un contenedor; repetir para aplicar cambios en los values)
+docker run --rm --network host -v ~/.kube:/root/.kube:ro -v "$PWD":/apps -w /apps alpine/helm:3.17.3 \
+  upgrade --install kps oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
+  --version 93.3.0 -n monitoring --create-namespace \
+  -f deploy/k8s/platform/kube-prometheus-stack/values.yaml \
+  -f deploy/k8s/platform/kube-prometheus-stack/values-local.yaml
+# 2. App + dashboards + ServiceMonitor
+kubectl apply -k deploy/k8s/overlays/local
+# 3. Grafana (el 3000 lo ocupa el Grafana de Compose); usuario y contraseña en grafana.env
+kubectl port-forward -n monitoring svc/kps-grafana 3001:80          # http://localhost:3001
+kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus (opcional)
+```
+
+- **Agregar o cambiar un dashboard:** edítalo en Grafana, exporta el JSON (Export → sin "for sharing externally") a
+  `deploy/k8s/platform/grafana/dashboards/`, agrégalo a `configMapGenerator` en `platform/kustomization.yaml` y
+  `apply -k`. Los dashboards provisionados no se guardan desde la UI: la fuente es git. Las consultas deben apuntar al
+  datasource `timescaledb` o `prometheus` (uids fijos).
+- **Contraseña de `grafana_ro`:** cambiarla en `grafana.env`, `apply -k`, volver a correr el Job de migraciones
+  (`kubectl delete job geotracker-migrate -n geotracker` + `apply -k`) y `kubectl rollout restart
+  deployment/kps-grafana -n monitoring`.
+- **Imágenes a k3d:** importar **una por comando**. Con dos en el mismo `k3d image import` se quedó la versión
+  anterior en los nodos aunque reportó éxito (D33).
 
 ### CI/CD (abierto, fase 3+)
 

@@ -51,6 +51,14 @@ spec:
                 secretKeyRef:
                   name: geotracker-secret
                   key: TOMTOM_API_KEY
+            # Enables login for the read-only role grafana_ro (migration 013) with
+            # this password (D33). Optional: without it the role stays NOLOGIN.
+            - name: GRAFANA_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-secret
+                  key: GRAFANA_DB_PASSWORD
+                  optional: true
           resources:
             requests:
               memory: "128Mi"

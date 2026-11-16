@@ -188,7 +188,8 @@ Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
 `distancia_metros`, `metodo_inferencia` (`IDW_GRID`), `lat`, `lon`.
 152 834 filas, último dato 2026-06-17. No es hypertable. Ya no se escribe. Candidata a eliminarse
-cuando Grafana deje de consultarla.
+cuando Grafana deje de consultarla: el panel "mapa de calor" del Grafana de Compose todavía la lee, así que ese
+mapa muestra datos de 2026-06-17. El dashboard versionado (D33) ya lee `trafico_calles`.
 
 ## Migraciones (`db/migrations/`)
 
@@ -210,8 +211,17 @@ BD existente y sobre una BD vacía.
 | 010 | Hypertable `fact_flujo_aristas` (tráfico por arista desde vector tiles) |
 | 011 | Ruteo: `dim_velocidad_tipo_via`, vista `v_costos_grafo`, función `ruta_mas_rapida()` (ver `ROUTING.md`) |
 | 012 | Vista `v_tiempo_libre` (segundos a flujo libre por arista); `v_costos_grafo` pasa a usarla (D16) |
+| 013 | Rol `grafana_ro` (solo lectura) para Grafana: `SELECT` en `public` + privilegios por defecto para tablas futuras, `statement_timeout = 30s`, máximo 10 conexiones. Se crea `NOLOGIN`; `migrate.py` le asigna contraseña y login si recibe `GRAFANA_DB_PASSWORD` (D33) |
 
-`trafico_inferido` (legado) no está en las migraciones: existe solo en la BD actual.
+`trafico_inferido` (legado) no está en las migraciones: existe solo en la BD de Compose (no en la del cluster).
+
+### Roles
+| Rol | Uso | Permisos |
+|---|---|---|
+| `user` | Dueño del esquema: ETL, API, migraciones | Todos |
+| `grafana_ro` | Datasource TimescaleDB de Grafana (D33) | Solo `SELECT` en `public` (incluye tablas creadas después); consultas cortadas a los 30 s |
+
+Los roles son globales al servidor de PostgreSQL, no a la BD.
 
 ## Problemas conocidos (deuda técnica del esquema)
 
@@ -226,5 +236,5 @@ BD existente y sobre una BD vacía.
 | P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
 | P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
 | P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
-| P10 | `trafico_inferido` obsoleta | Ruido en el esquema | Eliminar tras migrar paneles de Grafana |
+| P10 | `trafico_inferido` obsoleta | Ruido en el esquema | El dashboard versionado ya no la usa: su panel de mapa de calor lee `trafico_calles` (D33). Solo la consulta el Grafana de Compose. En el cluster ni siquiera existe. Eliminarla de la BD de Compose al retirar ese Grafana (fase 4) |
 | P11 | ✅ **Resuelto en el ruteo** — auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original); `v_costos_grafo` los excluye. Siguen en la tabla (inofensivos) | — | Migración 011 |

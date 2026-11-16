@@ -126,6 +126,9 @@ kind: Service
 metadata:
   name: geotracker-api
   namespace: geotracker
+  # The ServiceMonitor (platform/servicemonitor-api.yaml) selects Services by label.
+  labels:
+    app: geotracker-api
 spec:
   selector:
     app: geotracker-api

@@ -34,7 +34,11 @@ Servicios (Compose v5, `restart: unless-stopped`, credenciales en `.env` — D17
 | BD | `trafico_db` | `localhost:5432` |
 | ETL | `etl_trafico` | **apagado** (perfil `etl-compose`): el ETL corre en Kubernetes (D29) |
 | API | `geotracker_api` | http://localhost:8000/docs |
-| Grafana | `grafana_bi` | http://localhost:3000 |
+| Grafana | `grafana_bi` | http://localhost:3000 (lee la BD de Compose; el de Kubernetes es el vigente, D33) |
+
+En Kubernetes, Grafana + Prometheus vienen del chart `kube-prometheus-stack` (namespace `monitoring`):
+`kubectl port-forward -n monitoring svc/kps-grafana 3001:80`. Instalación y operación: `docs/KUBERNETES.md`
+("Observabilidad: operación"). Dashboards como código en `deploy/k8s/platform/grafana/dashboards/`.
 
 ⚠️ La imagen de la BD está fijada (PostgreSQL 15.2 / TimescaleDB 2.10.2 / pgRouting 4.0.1). **No** uses
 `docker compose build timescaledb` ni cambies `db/Dockerfile` sin planear la actualización de extensiones (D17).
@@ -159,7 +163,7 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos; desde 2026-11-13 17:15 UTC corre como `CronJob`
    en k3d (D29) y el de Compose está apagado: el histórico previo sigue en la BD de Compose (y Grafana también) (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
-3. Observabilidad (fase 3, D31): `/metrics` y sondas listas en la API (D32). Sigue: exportar dashboards de Compose,
-   `kube-prometheus-stack` + Grafana del chart, `ejecuciones_etl`, rol `grafana_ro`, alertas.
+3. Observabilidad (fase 3, D31): sondas y `/metrics` en la API (D32); stack, Grafana 13.0.2, rol `grafana_ro` y
+   dashboard versionado en k3d (D33). Sigue: tabla `ejecuciones_etl`, reglas de alerta (Grafana), histórico (fase 4).
 4. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
 5. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).
