@@ -213,7 +213,7 @@
                   "config": {},
                   "name": "Layer 0",
                   "noRepeat": false,
-                  "type": "default"
+                  "type": "osm-standard"
                 },
                 "controls": {
                   "mouseWheelZoom": true,
@@ -388,7 +388,7 @@
                   "config": {},
                   "name": "Layer 0",
                   "noRepeat": false,
-                  "type": "default"
+                  "type": "osm-standard"
                 },
                 "controls": {
                   "mouseWheelZoom": true,

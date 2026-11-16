@@ -457,6 +457,17 @@ defecto (últimas 6 h) sus paneles salen vacíos, y con dos Grafana de credencia
 `grafana.env`) se confundía cuál era el vigente. El del cluster (D33) es el único.
 **Volver a usarlo:** `docker compose --profile grafana-compose up -d grafana`.
 
+## D36 — Mapa base de los Geomap: OpenStreetMap en lugar de CARTO (2026-11-16)
+**Decisión:** los dos paneles Geomap del dashboard usan `basemap.type = "osm-standard"` (teselas de
+tile.openstreetmap.org) en lugar de `"default"`.
+**Por qué:** `"default"` usa los basemaps de CARTO, que ahora piden API key: el mapa mostraba "API KEY REQUIRED
+carto.com/basemap/apikey" y solo se veían los puntos. OSM no requiere clave; su política de uso de teselas admite
+este volumen (uso interno, un puñado de usuarios). En producción con más tráfico: proveedor con clave o teselas
+propias.
+**Verificado:** captura con Chromium headless (Playwright, locale `es-MX`): las teselas cargan y las 3 consultas
+responden. Nota: sin locale, Chromium headless no arranca Grafana 13 (`RangeError: Incorrect locale information
+provided` en `Intl.NumberFormat`); es del navegador de prueba, no del servidor.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
