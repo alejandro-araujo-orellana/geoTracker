@@ -468,6 +468,21 @@ propias.
 responden. Nota: sin locale, Chromium headless no arranca Grafana 13 (`RangeError: Incorrect locale information
 provided` en `Intl.NumberFormat`); es del navegador de prueba, no del servidor.
 
+## D37 — Panel 2: calles medidas por tiles coloreadas por congestión (2026-11-16)
+**Decisión:** el panel "GeoMap Traffic" pasa a "Tráfico medido por calle (último ciclo)". Lee `trafico_calles` con
+`metodo_inferencia = 'TILE'` del último ciclo del rango (~15 k aristas, 1 223 km) en lugar de la última lectura de
+Segment Data por punto. Cada arista se densifica en puntos cada 30 m (`ST_LineInterpolatePoints` en UTM 14N) y los
+marcadores (3 px, opacidad 0.9) se colorean con los umbrales 1.3 / 1.7 / 2.5 y morado ≥ 9.99 (cerrada). Orden
+ascendente para que lo congestionado quede encima (las calles de doble sentido son dos aristas).
+**Por qué:** el panel anterior no comunicaba el tráfico: color fijo amarillo, 5 px y opacidad 0.4 sobre un mapa
+de calles amarillas, y Segment Data ya es fuente secundaria (1–4 de 207 puntos por ciclo; había lecturas de hasta
+2.5 días). Geomap no dibuja una línea por segmento (la capa "route" une todos los puntos del frame) y la capa
+GeoJSON solo acepta archivos estáticos; densificar en puntos da trazos continuos a zoom 12–15 sin plugins.
+**Costo:** ~38 k puntos, ~0.3 s en la BD y ~3.4 MB por carga del panel. Si pesa, subir el paso a 50 m o filtrar
+`tipo_via`. Las aristas inferidas (`IDW_TILE`) siguen en el panel 3.
+**Verificado:** capturas con Chromium (vista completa y zoom al centro): trazos continuos coloreados, leyenda con los
+5 rangos y tooltip con calle, tipo de vía y hora del ciclo.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

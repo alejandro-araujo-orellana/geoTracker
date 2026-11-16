@@ -152,8 +152,8 @@
         "kind": "Panel",
         "spec": {
           "id": 2,
-          "title": "GeoMap Traffic",
-          "description": "",
+          "title": "Tráfico medido por calle (último ciclo)",
+          "description": "Calles medidas por los vector tiles de TomTom en el último ciclo del rango (trafico_calles, metodo_inferencia = TILE). Cada calle se dibuja como puntos cada 30 m, coloreados por congestión: 1 = flujo libre; 10 = cerrada (D37).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -174,7 +174,7 @@
                         "editorMode": "code",
                         "format": "table",
                         "rawQuery": true,
-                        "rawSql": "WITH ultima_lectura AS (\r\n    SELECT DISTINCT ON (id_segmento)\r\n        id_segmento,\r\n        timestamp_lectura,\r\n        nivel_congestion,\r\n        velocidad_actual\r\n    FROM fact_lecturas_trafico\r\n    ORDER BY id_segmento, timestamp_lectura DESC\r\n)\r\nSELECT\r\n    d.nombre_via,\r\n    u.timestamp_lectura          AS \"time\",\r\n    u.nivel_congestion           AS \"congestion\",\r\n    u.velocidad_actual,\r\n    -- Centroide real del segmento en lugar del primer punto del JSONB.\r\n    -- ST_Y/ST_X extraen lat/lon del punto central de la línea completa.\r\n    ST_Y(ST_Centroid(d.geom))    AS latitude,\r\n    ST_X(ST_Centroid(d.geom))    AS longitude\r\nFROM ultima_lectura u\r\nJOIN dim_segmentos_viales d ON u.id_segmento = d.id_segmento\r\nWHERE d.geom IS NOT NULL;",
+                        "rawSql": "-- Calles MEDIDAS por tiles (metodo_inferencia = 'TILE') en el último ciclo del rango (D37).\n-- Geomap no dibuja una línea por segmento: cada calle se densifica en puntos cada 30 m (UTM 14N),\n-- que a zoom 12-15 se ven como un trazo continuo. ~15 k calles → ~38 k puntos, ~0.3 s.\n-- Orden ascendente: las calles más congestionadas se pintan encima (las de doble sentido son dos aristas).\n-- nivel_congestion_inf: 1 = flujo libre; mayor = más congestión; 10 = cerrada.\nWITH ciclo AS (\n    SELECT max(timestamp_calculo) AS ts\n    FROM trafico_calles\n    WHERE $__timeFilter(timestamp_calculo) AND metodo_inferencia = 'TILE'\n), medidas AS (\n    SELECT t.timestamp_calculo,\n           t.nivel_congestion_inf,\n           o.nombre,\n           o.tipo_via,\n           ST_Transform(o.geom, 32614) AS g\n    FROM trafico_calles t\n    JOIN ciclo c ON t.timestamp_calculo = c.ts\n    JOIN dim_calles_osm o ON o.osm_id = t.osm_id\n    WHERE t.metodo_inferencia = 'TILE'\n)\nSELECT\n    m.timestamp_calculo                       AS \"time\",\n    round(m.nivel_congestion_inf::numeric, 2) AS congestion,\n    coalesce(m.nombre, '(sin nombre)')        AS calle,\n    m.tipo_via,\n    ST_Y(d.p)                                 AS latitude,\n    ST_X(d.p)                                 AS longitude\nFROM medidas m\nCROSS JOIN LATERAL (\n    SELECT (ST_DumpPoints(ST_Transform(\n               ST_LineInterpolatePoints(m.g, least(1.0, 30.0 / greatest(ST_Length(m.g), 30.0))),\n               4326))).geom AS p\n) d\nORDER BY congestion ASC;",
                         "sql": {
                           "columns": [
                             {
@@ -229,9 +229,10 @@
                       "showLegend": true,
                       "style": {
                         "color": {
-                          "fixed": "#FADE2A"
+                          "field": "congestion",
+                          "fixed": "green"
                         },
-                        "opacity": 0.4,
+                        "opacity": 0.9,
                         "rotation": {
                           "fixed": 0,
                           "max": 360,
@@ -239,7 +240,7 @@
                           "mode": "mod"
                         },
                         "size": {
-                          "fixed": 5,
+                          "fixed": 3,
                           "max": 15,
                           "min": 2
                         },
@@ -265,7 +266,7 @@
                       "longitude": "longitude",
                       "mode": "coords"
                     },
-                    "name": "Layer 1",
+                    "name": "Congestión",
                     "tooltip": true,
                     "type": "markers"
                   }
@@ -302,7 +303,11 @@
                       },
                       {
                         "value": 2.5,
-                        "color": "dark-red"
+                        "color": "red"
+                      },
+                      {
+                        "value": 9.99,
+                        "color": "purple"
                       }
                     ]
                   },
