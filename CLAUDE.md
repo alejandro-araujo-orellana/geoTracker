@@ -34,7 +34,7 @@ Servicios (Compose v5, `restart: unless-stopped`, credenciales en `.env` — D17
 | BD | `trafico_db` | `localhost:5432` |
 | ETL | `etl_trafico` | **apagado** (perfil `etl-compose`): el ETL corre en Kubernetes (D29) |
 | API | `geotracker_api` | http://localhost:8000/docs |
-| Grafana | `grafana_bi` | http://localhost:3000 (lee la BD de Compose; el de Kubernetes es el vigente, D33) |
+| Grafana | `grafana_bi` | **apagado** (perfil `grafana-compose`): el vigente es el del cluster, en :3001 (D33, D35) |
 
 En Kubernetes, Grafana + Prometheus vienen del chart `kube-prometheus-stack` (namespace `monitoring`):
 `kubectl port-forward -n monitoring svc/kps-grafana 3001:80`. Instalación y operación: `docs/KUBERNETES.md`

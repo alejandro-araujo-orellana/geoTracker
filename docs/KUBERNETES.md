@@ -331,8 +331,8 @@ docker run --rm --network host -v ~/.kube:/root/.kube:ro -v "$PWD":/apps -w /app
   -f deploy/k8s/platform/kube-prometheus-stack/values-local.yaml
 # 2. App + dashboards + ServiceMonitor
 kubectl apply -k deploy/k8s/overlays/local
-# 3. Grafana del cluster. El 3000 lo ocupa el Grafana de Compose (grafana_bi), que es OTRA instancia con
-#    otras credenciales (GF_ADMIN_* en .env). Aquí: GF_SECURITY_ADMIN_* de grafana.env.
+# 3. Grafana del cluster. Se dejó en 3001 porque el 3000 era del Grafana de Compose (grafana_bi, apagado en D35):
+#    OTRA instancia con otras credenciales. Aquí: GF_SECURITY_ADMIN_* de grafana.env.
 #    3001 = puerto local; 80 = puerto del Service, que reenvía al 3000 del pod.
 kubectl port-forward -n monitoring svc/kps-grafana 3001:80          # http://localhost:3001
 kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus (opcional)

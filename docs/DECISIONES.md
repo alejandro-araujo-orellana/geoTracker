@@ -449,6 +449,14 @@ siguiente reinicio. Con IP en la configuración del endpoint, Docker la respeta 
 **Consecuencia:** si se recrea el cluster con `k3d cluster create`, repetir el procedimiento de
 `docs/KUBERNETES.md` ("Observabilidad: operación"). En Azure (fase 2) no aplica.
 
+## D35 — Grafana de Compose apagado (2026-11-16)
+**Decisión:** el servicio `grafana` de Compose pasa al perfil `grafana-compose` (igual que el ETL en D29) y el
+contenedor `grafana_bi` se elimina; el volumen `geotracker_grafana_data` se conserva.
+**Por qué:** lee la BD de Compose, sin datos nuevos desde el 2026-11-13 17:02 UTC (corte de D29): con el rango por
+defecto (últimas 6 h) sus paneles salen vacíos, y con dos Grafana de credenciales distintas (`.env` vs
+`grafana.env`) se confundía cuál era el vigente. El del cluster (D33) es el único.
+**Volver a usarlo:** `docker compose --profile grafana-compose up -d grafana`.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
