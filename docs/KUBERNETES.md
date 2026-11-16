@@ -331,7 +331,9 @@ docker run --rm --network host -v ~/.kube:/root/.kube:ro -v "$PWD":/apps -w /app
   -f deploy/k8s/platform/kube-prometheus-stack/values-local.yaml
 # 2. App + dashboards + ServiceMonitor
 kubectl apply -k deploy/k8s/overlays/local
-# 3. Grafana (el 3000 lo ocupa el Grafana de Compose); usuario y contraseña en grafana.env
+# 3. Grafana del cluster. El 3000 lo ocupa el Grafana de Compose (grafana_bi), que es OTRA instancia con
+#    otras credenciales (GF_ADMIN_* en .env). Aquí: GF_SECURITY_ADMIN_* de grafana.env.
+#    3001 = puerto local; 80 = puerto del Service, que reenvía al 3000 del pod.
 kubectl port-forward -n monitoring svc/kps-grafana 3001:80          # http://localhost:3001
 kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus (opcional)
 ```
@@ -343,6 +345,25 @@ kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus
 - **Contraseña de `grafana_ro`:** cambiarla en `grafana.env`, `apply -k`, volver a correr el Job de migraciones
   (`kubectl delete job geotracker-migrate -n geotracker` + `apply -k`) y `kubectl rollout restart
   deployment/kps-grafana -n monitoring`.
+- **IPs fijas de los nodos k3d (D34):** al reiniciar (`k3d cluster stop/start` o reinicio de Docker/WSL), Docker
+  reasignaba las IPs de la red `k3d-geotracker` según el orden de arranque. El 2026-11-16 `agent-1` quedó en
+  172.23.0.3 mientras su objeto `Node` decía 172.23.0.5 (ahora del `serverlb`): k3s se apagaba en bucle con
+  `failed to find interface with specified node ip` y `k3d cluster start` fallaba al editar `/etc/hosts`
+  ("container is restarting"). Arreglo aplicado: IPs estáticas por contenedor, que Docker conserva entre reinicios.
+  Si se recrea el cluster, o vuelve a pasar:
+  ```bash
+  k3d cluster stop geotracker
+  for p in server-0:172.23.0.2 serverlb:172.23.0.3 agent-0:172.23.0.4 agent-1:172.23.0.5; do
+    docker network disconnect k3d-geotracker k3d-geotracker-${p%%:*}
+    docker network connect --ip ${p##*:} k3d-geotracker k3d-geotracker-${p%%:*}
+  done
+  k3d cluster start geotracker
+  ```
+  Usar las IPs que muestre `kubectl get nodes -o wide` (las del registro de cada `Node`); al `serverlb` darle una
+  libre. Diagnóstico: `docker logs --tail 30 k3d-geotracker-agent-N` y comparar con
+  `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <contenedor>`.
+- **Al reactivar el cluster** el ETL retoma solo en el siguiente `*/15`, pero lo no medido mientras estuvo apagado se
+  pierde (2026-11-14 08:00 → 2026-11-16 07:46 UTC). La alerta "ETL sin correr" (pendiente, fase 3) lo detectaría.
 - **Imágenes a k3d:** importar **una por comando**. Con dos en el mismo `k3d image import` se quedó la versión
   anterior en los nodos aunque reportó éxito (D33).
 

@@ -439,6 +439,16 @@ reemplazó. Importar una imagen por comando y comprobar la fecha con
 **Pendiente:** Grafana registra una vez al cargar un `level=error` interno ("[SHOULD NOT HAPPEN] failed to update
 managedFields") sobre el esquema v2; el dashboard funciona. Revisar al subir de versión.
 
+## D34 — IPs estáticas para los nodos de k3d (2026-11-16)
+**Decisión:** los contenedores del cluster `geotracker` se reconectan a la red `k3d-geotracker` con IP fija
+(`server-0` .2, `serverlb` .3, `agent-0` .4, `agent-1` .5).
+**Por qué:** tras dos días apagado, `k3d cluster start` falló: Docker asignó las IPs por orden de arranque y
+`agent-1` (registrado como .5) recibió .3; k3s se apagaba en bucle (`failed to find interface with specified node
+ip`). Se descartó borrar el objeto `Node` para que se re-registre: arregla una vez, pero el problema vuelve en el
+siguiente reinicio. Con IP en la configuración del endpoint, Docker la respeta siempre.
+**Consecuencia:** si se recrea el cluster con `k3d cluster create`, repetir el procedimiento de
+`docs/KUBERNETES.md` ("Observabilidad: operación"). En Azure (fase 2) no aplica.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
