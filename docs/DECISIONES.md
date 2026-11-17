@@ -483,6 +483,38 @@ GeoJSON solo acepta archivos estáticos; densificar en puntos da trazos continuo
 **Verificado:** capturas con Chromium (vista completa y zoom al centro): trazos continuos coloreados, leyenda con los
 5 rangos y tooltip con calle, tipo de vía y hora del ciclo.
 
+## D38 — Panel 1 como serie de tiempo sobre un continuous aggregate (2026-11-17)
+**Decisión:** el panel 1 ("HeatMap SLP Traffic", heatmap sobre Segment Data) pasa a "Congestión por ciclo (calles
+medidas)", serie de tiempo con la congestión promedio (eje izquierdo) y el % de aristas con congestión ≥ 1.3 (eje
+derecho, punteado). Lee el continuous aggregate `resumen_trafico_ciclo` (migración 014). Huecos > 30 min sin unir
+(`insertNulls`) para que los ciclos perdidos se vean.
+**Por qué:** Segment Data mide 1–4 puntos por ciclo (5 filas en 6 h): la serie no representaba la ciudad. Las
+~15 k aristas medidas por tiles sí, pero agregar `trafico_calles` (67 k filas por ciclo) en cada carga tardó ~8 s
+con solo 90 ciclos y crece lineal con el histórico; con el aggregate, ~30 ms. Solo aristas `TILE`: las `IDW_TILE`
+son interpoladas y diluyen la señal. El % complementa al promedio, que con 15 k aristas mayormente libres se
+mueve poco (1.00–1.18).
+**Alternativas descartadas:** tabla de resumen escrita por `predictor.py` (más código en el ETL y otra ruta de
+escritura que mantener idempotente); `migrate.py` con migraciones fuera de transacción (innecesario: `WITH NO DATA`
+permite crear el aggregate dentro y la política hace el refresco inicial).
+**Verificado:** `tests/test_resumen_trafico_db.py` (4 tests: solo `TILE`, umbrales, igual en vivo y materializado,
+lectura como `grafana_ro`, política registrada); suite ETL 168/168. Migración aplicada en k3d por el Job; captura
+del panel con 2 días de datos.
+
+## D39 — Memoria de PostgreSQL dimensionada al límite del pod (2026-11-17)
+**Decisión:** el StatefulSet de la BD pasa `args` a `postgres` con `shared_buffers=256MB`,
+`effective_cache_size=768MB`, `work_mem=8MB`, `maintenance_work_mem=64MB`, `autovacuum_max_workers=3`,
+`max_parallel_workers_per_gather=1` y `max_parallel_workers=2`, acordes con `limits.memory: 1Gi`.
+**Por qué:** al cargar el dashboard (D37/D38) el pod de la BD murió con **OOMKilled** (exit 137) y arrancó con
+recuperación del WAL. El `postgresql.conf` del volumen se generó al hacer `initdb` con valores para todo el host
+(16 CPU, ~8 GB): `shared_buffers` 1955 MB, `maintenance_work_mem` 1 GB × 10 workers de autovacuum y 8 workers
+paralelos por consulta, muy por encima del límite de 1 GiB. Ya acumulaba 3 reinicios. Con `-c` en la línea de
+comandos se sobrescribe el archivo sin tocar el volumen y queda versionado; `ALTER SYSTEM` habría dejado la
+configuración dentro del PVC, fuera de git.
+**Verificado:** `pg_settings` muestra los 7 valores con `source = command line`; dos cargas completas del dashboard
+(3 paneles, 2 días) sin reinicio; working set máximo 688 MiB (pico del cgroup 877 MiB, incluye page cache).
+**Pendiente:** si el pico real crece con el histórico, subir el límite a 1.5 Gi antes que bajar `shared_buffers`.
+En CloudNativePG (fase 2) estos valores van en `spec.postgresql.parameters`.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

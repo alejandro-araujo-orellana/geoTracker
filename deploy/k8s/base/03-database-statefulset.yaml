@@ -50,6 +50,27 @@ spec:
           # should be charged on the cluster service.
           image: geotracker-timescaledb:pg15.2-ts2.10.2
           imagePullPolicy: IfNotPresent   # uses the local image if already exists
+          # Memory settings sized for the 1Gi limit below (D39). The postgresql.conf in
+          # PGDATA was tuned at initdb for the whole host (shared_buffers ~2GB,
+          # maintenance_work_mem 1GB x 10 autovacuum workers, 8 parallel workers per
+          # query): heavy Grafana queries got the pod OOMKilled (2026-11-17).
+          # `-c` overrides the file; keep these in sync with resources.limits.memory.
+          args:
+            - postgres
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - effective_cache_size=768MB
+            - -c
+            - work_mem=8MB
+            - -c
+            - maintenance_work_mem=64MB
+            - -c
+            - autovacuum_max_workers=3
+            - -c
+            - max_parallel_workers_per_gather=1
+            - -c
+            - max_parallel_workers=2
           ports:
             - containerPort: 5432
               name: postgres

@@ -184,6 +184,15 @@ reciente, v2 usa Segment Data de las últimas 6 h (`VENTANA_LECTURAS`) con `IDW_
 
 Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
 
+### `resumen_trafico_ciclo` — resumen por ciclo de las aristas medidas (continuous aggregate, migración 014)
+Sobre `trafico_calles` con `metodo_inferencia = 'TILE'`, en buckets de 15 min (`ciclo`): `aristas_medidas`,
+`congestion_promedio`, `aristas_congestionadas` (≥ 1.3, incluye cerradas) y `aristas_cerradas` (≥ 9.99). Alimenta
+el panel 1 del dashboard (D38). `materialized_only = false`: el ciclo aún sin materializar se calcula en vivo.
+Política de refresco cada 15 min sobre los últimos 7 días (= `compress_after`); un histórico más antiguo
+restaurado se refresca a mano, **fuera de transacción**:
+`CALL refresh_continuous_aggregate('resumen_trafico_ciclo', NULL, now() - INTERVAL '7 days');`
+Costo: 90 ciclos en ~30 ms (agregando `trafico_calles` directo: ~8 s).
+
 ### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
 `distancia_metros`, `metodo_inferencia` (`IDW_GRID`), `lat`, `lon`.
@@ -212,6 +221,7 @@ BD existente y sobre una BD vacía.
 | 011 | Ruteo: `dim_velocidad_tipo_via`, vista `v_costos_grafo`, función `ruta_mas_rapida()` (ver `ROUTING.md`) |
 | 012 | Vista `v_tiempo_libre` (segundos a flujo libre por arista); `v_costos_grafo` pasa a usarla (D16) |
 | 013 | Rol `grafana_ro` (solo lectura) para Grafana: `SELECT` en `public` + privilegios por defecto para tablas futuras, `statement_timeout = 30s`, máximo 10 conexiones. Se crea `NOLOGIN`; `migrate.py` le asigna contraseña y login si recibe `GRAFANA_DB_PASSWORD` (D33) |
+| 014 | Continuous aggregate `resumen_trafico_ciclo` (aristas medidas por ciclo) + política de refresco de 7 días. Se crea `WITH NO DATA` para poder ir en la transacción de `migrate.py` (D38) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD de Compose (no en la del cluster).
 

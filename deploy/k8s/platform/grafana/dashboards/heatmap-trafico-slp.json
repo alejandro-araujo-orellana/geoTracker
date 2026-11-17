@@ -33,8 +33,8 @@
         "kind": "Panel",
         "spec": {
           "id": 1,
-          "title": "HeatMap SLP Traffic",
-          "description": "",
+          "title": "Congestión por ciclo (calles medidas)",
+          "description": "Por ciclo de 15 min, sobre las calles medidas por tiles (resumen_trafico_ciclo, D38): congestión promedio (1 = flujo libre) y % de calles con congestión >= 1.3 (incluye cerradas). Los huecos son ciclos sin datos (ETL o cluster detenido).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -53,9 +53,9 @@
                       "spec": {
                         "dataset": "vialidades_slp",
                         "editorMode": "code",
-                        "format": "table",
+                        "format": "time_series",
                         "rawQuery": true,
-                        "rawSql": "SELECT\r\n    time_bucket('15 minutes', timestamp_lectura) AS \"time\",\r\n    AVG(nivel_congestion)                         AS \"congestion_promedio\"\r\nFROM fact_lecturas_trafico\r\nWHERE $__timeFilter(timestamp_lectura)\r\nGROUP BY \"time\"\r\nORDER BY \"time\" ASC;",
+                        "rawSql": "-- Serie por ciclo desde el continuous aggregate resumen_trafico_ciclo (migración 014, D38).\nSELECT\n    ciclo                                                   AS \"time\",\n    congestion_promedio                                     AS \"Congestión promedio\",\n    100.0 * aristas_congestionadas / NULLIF(aristas_medidas, 0) AS \"% calles congestionadas\"\nFROM resumen_trafico_ciclo\nWHERE $__timeFilter(ciclo)\nORDER BY 1;",
                         "sql": {
                           "columns": [
                             {
@@ -86,63 +86,124 @@
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "heatmap",
+            "group": "timeseries",
             "version": "13.0.2",
             "spec": {
               "options": {
-                "annotations": {
-                  "clustering": -1,
-                  "multiLane": false
-                },
-                "calculate": false,
-                "cellGap": 1,
-                "color": {
-                  "exponent": 0.5,
-                  "fill": "dark-orange",
-                  "max": 2.5,
-                  "min": 1,
-                  "mode": "scheme",
-                  "reverse": false,
-                  "scale": "exponential",
-                  "scheme": "RdYlGn",
-                  "steps": 64
-                },
-                "exemplars": {
-                  "color": "rgba(255,0,255,0.7)"
-                },
-                "filterValues": {
-                  "le": 1e-09
-                },
                 "legend": {
-                  "show": true
-                },
-                "rowsFrame": {
-                  "layout": "auto"
+                  "showLegend": true,
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
-                  "mode": "single",
-                  "showColorScale": false,
-                  "yHistogram": false
-                },
-                "yAxis": {
-                  "axisPlacement": "left",
-                  "reverse": false
+                  "mode": "multi",
+                  "sort": "none"
                 }
               },
               "fieldConfig": {
                 "defaults": {
+                  "decimals": 2,
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "orange"
+                  },
                   "custom": {
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "scaleDistribution": {
-                      "type": "linear"
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 10,
+                    "gradientMode": "none",
+                    "showPoints": "never",
+                    "spanNulls": false,
+                    "insertNulls": 1800000,
+                    "axisPlacement": "auto",
+                    "axisSoftMin": 1,
+                    "thresholdsStyle": {
+                      "mode": "line+area"
                     }
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "transparent"
+                      },
+                      {
+                        "value": 1.3,
+                        "color": "yellow"
+                      },
+                      {
+                        "value": 1.7,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 2.5,
+                        "color": "red"
+                      }
+                    ]
                   }
                 },
-                "overrides": []
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "% calles congestionadas"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "percent"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 1
+                      },
+                      {
+                        "id": "min",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "right"
+                      },
+                      {
+                        "id": "custom.axisSoftMin",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "fill": "dash",
+                          "dash": [
+                            6,
+                            4
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.thresholdsStyle",
+                        "value": {
+                          "mode": "off"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "red"
+                        }
+                      }
+                    ]
+                  }
+                ]
               }
             }
           }
