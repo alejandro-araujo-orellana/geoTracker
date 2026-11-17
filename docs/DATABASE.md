@@ -193,6 +193,22 @@ restaurado se refresca a mano, **fuera de transacción**:
 `CALL refresh_continuous_aggregate('resumen_trafico_ciclo', NULL, now() - INTERVAL '7 days');`
 Costo: 90 ciclos en ~30 ms (agregando `trafico_calles` directo: ~8 s).
 
+### `ejecuciones_etl` — una fila por ciclo del ETL (migración 015)
+| Columna | Tipo | Notas |
+|---|---|---|
+| `inicio` | `timestamptz` PK | Inicio del ciclo (UTC); idempotencia (`ON CONFLICT DO NOTHING`) |
+| `fin`, `duracion_s` | `timestamptz`, `double precision` | `duracion_s` generada (`fin − inicio`) |
+| `estado` | `text` CHECK | `ok` (midió y corrió el predictor), `sin_datos` (ninguna fuente trajo datos), `error` (excepción; el Job sale con 1) |
+| `aristas_medidas` | `integer` | Aristas asociadas desde tiles (0 si la pasada falló o no hubo cupo) |
+| `tiles_peticiones`, `tiles_bloqueado` | `integer`, `boolean` | Consumo de la pasada y si hubo 403 |
+| `sd_peticiones`, `sd_bloqueado`, `sd_cargado` | `integer`, `boolean`, `boolean` | Segment Data |
+| `predictor` | `boolean` | Si corrió el predictor |
+| `error` | `text` | Excepciones, incluidas las absorbidas (fallo de tiles con Segment Data de respaldo); máx. 2000 caracteres |
+| `pod` | `text` | `HOSTNAME` del pod → `kubectl logs` |
+
+La escribe `src/ejecuciones.py` desde `main.ciclo_etl`, también si el ciclo falla; si guardarla falla, el ciclo
+sigue. Tabla normal (~96 filas/día). La leen el panel "ETL: últimos ciclos" y la alerta "ETL sin datos de tiles" (D41).
+
 ### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
 `distancia_metros`, `metodo_inferencia` (`IDW_GRID`), `lat`, `lon`.
@@ -222,6 +238,7 @@ BD existente y sobre una BD vacía.
 | 012 | Vista `v_tiempo_libre` (segundos a flujo libre por arista); `v_costos_grafo` pasa a usarla (D16) |
 | 013 | Rol `grafana_ro` (solo lectura) para Grafana: `SELECT` en `public` + privilegios por defecto para tablas futuras, `statement_timeout = 30s`, máximo 10 conexiones. Se crea `NOLOGIN`; `migrate.py` le asigna contraseña y login si recibe `GRAFANA_DB_PASSWORD` (D33) |
 | 014 | Continuous aggregate `resumen_trafico_ciclo` (aristas medidas por ciclo) + política de refresco de 7 días. Se crea `WITH NO DATA` para poder ir en la transacción de `migrate.py` (D38) |
+| 015 | Tabla `ejecuciones_etl`: una fila por ciclo del ETL (estado, aristas, peticiones, error, pod) (D41) |
 
 `trafico_inferido` (legado) no está en las migraciones: existe solo en la BD de Compose (no en la del cluster).
 

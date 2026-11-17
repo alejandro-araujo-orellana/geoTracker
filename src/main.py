@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 # Importamos la configuración y los módulos "tontos"
 import config
 import asociador
+import ejecuciones
 import extractor
 import extractor_tiles
 import transformer
@@ -68,7 +69,7 @@ def planificar_ciclo(engine, ahora_local: datetime) -> tuple[dict, presupuesto.C
 # ---------------------------------------------------------------------------
 # Fuentes
 # ---------------------------------------------------------------------------
-def ciclo_tiles(engine, ahora_local: datetime) -> int:
+def ciclo_tiles(engine, ahora_local: datetime, resumen: ejecuciones.ResumenCiclo | None = None) -> int:
     """Fuente principal: pasada de vector tiles → fact_flujo_aristas. Devuelve aristas medidas."""
     cupo = planificar_tiles(engine, ahora_local)
     if cupo.limite == 0:
@@ -79,10 +80,12 @@ def ciclo_tiles(engine, ahora_local: datetime) -> int:
     finally:
         presupuesto.registrar_consumo(engine, ahora_local.date(), cupo.usadas, cupo.bloqueado,
                                       api=presupuesto.API_FLOW_TILES)
+        if resumen:
+            resumen.tiles_peticiones, resumen.tiles_bloqueado = cupo.usadas, cupo.bloqueado
     return asociador.asociar_y_guardar(engine, tramos, timestamp)
 
 
-def ciclo_segment_data(engine, ahora_local: datetime) -> bool:
+def ciclo_segment_data(engine, ahora_local: datetime, resumen: ejecuciones.ResumenCiclo | None = None) -> bool:
     """Fuente secundaria: Flow Segment Data dentro de su pool. Devuelve True si cargó datos."""
     puntos, cupo = planificar_ciclo(engine, ahora_local)
     if not puntos:
@@ -105,6 +108,8 @@ def ciclo_segment_data(engine, ahora_local: datetime) -> bool:
     finally:
         presupuesto.registrar_consumo(engine, ahora_local.date(), cupo.usadas, cupo.bloqueado)
         logger.info("Peticiones consumidas en el ciclo: %d/%d", cupo.usadas, cupo.limite)
+        if resumen:
+            resumen.sd_peticiones, resumen.sd_bloqueado = cupo.usadas, cupo.bloqueado
 
     if not datos_crudos:
         logger.warning("Segment Data: no se obtuvieron datos.")
@@ -115,27 +120,50 @@ def ciclo_segment_data(engine, ahora_local: datetime) -> bool:
 
 
 def ciclo_etl(engine):
+    """Un ciclo completo. Siempre deja su fila en ejecuciones_etl (D41), también si falla."""
+    resumen = ejecuciones.ResumenCiclo.iniciar()
+    try:
+        _ciclo_etl(engine, resumen)
+    except Exception as exc:
+        resumen.estado = "error"
+        resumen.anotar_error("ciclo", exc)
+        raise
+    finally:
+        resumen.terminar()
+        try:
+            ejecuciones.registrar(engine, resumen)
+        except Exception:
+            logger.exception("No se pudo registrar el ciclo en ejecuciones_etl; el ciclo sigue.")
+
+
+def _ciclo_etl(engine, resumen: ejecuciones.ResumenCiclo) -> None:
     logger.info("=== Iniciando Ciclo ETL ===")
     ahora_local = datetime.now(ZoneInfo(config.ZONA_HORARIA))
 
     # 1. Fuente principal (tiles). Un fallo aquí no debe impedir la secundaria.
     try:
-        aristas_medidas = ciclo_tiles(engine, ahora_local)
-    except Exception:
+        aristas_medidas = ciclo_tiles(engine, ahora_local, resumen)
+    except Exception as exc:
         logger.exception("Falló la pasada de tiles; se continúa con Segment Data.")
+        resumen.anotar_error("tiles", exc)
         aristas_medidas = 0
+    resumen.aristas_medidas = aristas_medidas
 
     # 2. Fuente secundaria (Segment Data)
-    hubo_segment_data = ciclo_segment_data(engine, ahora_local)
+    hubo_segment_data = ciclo_segment_data(engine, ahora_local, resumen)
+    resumen.sd_cargado = bool(hubo_segment_data)
 
     if not aristas_medidas and not hubo_segment_data:
         logger.warning("Sin datos nuevos de ninguna fuente. Se omite el predictor.")
+        resumen.estado = "sin_datos"
         return
     logger.info("=== Ciclo ETL Completado (tiles: %d aristas | segment data: %s) ===",
                 aristas_medidas, "sí" if hubo_segment_data else "no")
 
     # 3. PREDICTOR
     predictor.ejecutar(engine)
+    resumen.predictor = True
+    resumen.estado = "ok"
     logger.info("==== Predictor Completado ===")
 
 

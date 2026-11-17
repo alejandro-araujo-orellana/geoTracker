@@ -59,3 +59,44 @@ groups:
             Esos ciclos no tienen datos de tráfico. Revisar: kubectl get cronjob,jobs -n geotracker
             (¿suspend=true?, ¿Job fallido?) y si el equipo estuvo apagado o suspendido.
           runbook_url: docs/KUBERNETES.md#observabilidad-operación-d33
+
+      # The Job can succeed without measuring anything (tile pass failed and was
+      # absorbed, 403 block, no budget): ejecuciones_etl (D41) tells. Needs >= 3
+      # cycles in the window (HAVING): fewer rows = no data = OK; "ETL sin
+      # correr" already covers "no cycles at all".
+      - uid: etl-sin-tiles
+        title: ETL sin datos de tiles
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: timescaledb
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT count(*) FILTER (WHERE aristas_medidas > 0) AS ciclos_con_tiles
+                FROM ejecuciones_etl
+                WHERE inicio > now() - INTERVAL '50 minutes'
+                HAVING count(*) >= 3
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+          servicio: etl
+        annotations:
+          summary: Los últimos ciclos del ETL corrieron pero no midieron ninguna calle con tiles
+          description: >-
+            Ningún ciclo de los últimos 50 min midió aristas con vector tiles. Ver la columna error de
+            ejecuciones_etl y la alerta "TomTom respondió 403"; logs: kubectl logs -n geotracker job/<último>.

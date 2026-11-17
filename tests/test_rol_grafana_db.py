@@ -11,7 +11,7 @@ dejaría aplicar las migraciones ahí.
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -20,7 +20,9 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 URL = "postgresql+psycopg2://{u}:{p}@{h}:{port}/{db}"
 HOST = os.environ.get("DB_HOST", "localhost")
 PUERTO = os.environ.get("DB_PORT", "5432")
-TS = datetime(2026, 11, 13, 20, 0, tzinfo=timezone.utc)
+# Reciente, no fija: la política de compresión (008) comprime chunks de más de 7 días y, en la
+# BD temporal, compite con los INSERT del test (deadlock). Hora en punto: el test usa :15/:30/:45.
+TS = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
 
 
 def _url(usuario, clave, bd):

@@ -1,0 +1,80 @@
+# ============================================================================
+# Grafana alert rules — routing API (D31, D32, D41)
+# ============================================================================
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: geotracker-api
+    folder: geoTracker
+    interval: 1m
+    rules:
+      # Available replicas count only pods that pass /health/ready, which checks
+      # the DB (D32): covers "pod down" and "API up but DB unreachable".
+      - uid: api-no-disponible
+        title: API de rutas no disponible
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(kube_deployment_status_replicas_available{namespace="geotracker", deployment="geotracker-api"})
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        # No series = the Deployment is gone or kube-state-metrics is down.
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: critical
+          servicio: api
+        annotations:
+          summary: La API de rutas no tiene réplicas listas
+          description: >-
+            Ningún pod de geotracker-api pasa /health/ready (pod caído o sin BD). Revisar:
+            kubectl get pods -n geotracker; kubectl describe pod -l app=geotracker-api -n geotracker.
+
+      # p95 of /api/v1/rutas over 10 min. `and on() ... > 0`: with no traffic the
+      # quantile is NaN; this turns it into "no data" (= OK) instead.
+      - uid: api-rutas-lenta
+        title: API /rutas lenta (p95 > 2 s)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: >-
+                histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="geotracker-api", handler="/api/v1/rutas"}[10m])))
+                and on() sum(rate(http_request_duration_seconds_count{job="geotracker-api", handler="/api/v1/rutas"}[10m])) > 0
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [2] }
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+          servicio: api
+        annotations:
+          summary: "/api/v1/rutas: p95 de {{ printf \"%.2f\" $values.A.Value }} s en 10 min"
+          description: >-
+            El 95 % de las rutas tarda más de 2 s. Suele ser la BD (ruta_mas_rapida + pgr_dijkstra):
+            revisar CPU/memoria de geotracker-db-0 y si un ciclo del predictor coincide.

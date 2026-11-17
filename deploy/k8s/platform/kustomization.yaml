@@ -30,11 +30,16 @@ configMapGenerator:
         grafana_dashboard: "1"
       annotations:
         grafana_folder: geoTracker
-  # Alert rules (D40), picked up by the Grafana alerts sidecar (label grafana_alert=1).
-  - name: grafana-alertas-etl
+  # Alert rules (D40, D41), picked up by the Grafana alerts sidecar (label
+  # grafana_alert=1). One ConfigMap, one file per domain; each file is its own
+  # rule group. (Replaced grafana-alertas-etl, deleted by hand: apply does not prune.)
+  - name: grafana-alertas
     namespace: monitoring
     files:
       - grafana/alerts/etl.yaml
+      - grafana/alerts/tomtom.yaml
+      - grafana/alerts/api.yaml
+      - grafana/alerts/bd.yaml
     options:
       disableNameSuffixHash: true
       labels:

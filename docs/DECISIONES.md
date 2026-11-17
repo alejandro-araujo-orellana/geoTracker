@@ -537,6 +537,53 @@ Normal, 1–2 min desde el último ciclo). Camino de disparo: una copia temporal
 la descripción renderizada ("…hace 1 min…") y se borró. Captura del dashboard: panel 4 en verde ("2 min"), panel 3
 con focos de congestión en lugar de un manto uniforme. BD sin reinicios.
 
+## D41 — Tabla `ejecuciones_etl` y el resto de las alertas iniciales (2026-11-17)
+**Decisión — `ejecuciones_etl` (migración 015):** una fila por ciclo con estado (`ok` / `sin_datos` / `error`),
+aristas medidas, peticiones y bloqueo por fuente, si corrió el predictor, el error y el pod. La escribe
+`src/ejecuciones.py` desde `main.ciclo_etl` en un `finally`: queda la fila aunque el ciclo falle, y si el registro
+falla el ciclo sigue (es observabilidad, no debe tumbar la medición). Los errores absorbidos (pasada de tiles que
+falla con Segment Data de respaldo) también se anotan: el Job sale con 0 y `kube-state-metrics` no los ve.
+**Decisión — reglas** (`platform/grafana/alerts/`, un archivo por dominio, ConfigMap `grafana-alertas`):
+
+| Regla | Fuente | Condición | `for` | Sin datos |
+|---|---|---|---|---|
+| ETL sin correr (D40) | Prometheus | > 45 min sin Job exitoso | 2m | Alerta |
+| ETL sin datos de tiles | `ejecuciones_etl` | ≥ 3 ciclos en 50 min y ninguno midió aristas | 1m | OK |
+| TomTom respondió 403 | `consumo_api` | `bloqueado` hoy (hora de SLP), por API | 0s | OK |
+| Consumo de TomTom por encima del ritmo | `consumo_api` | acumulado del mes > cuota × día / días del mes, por API | 10m | OK |
+| API de rutas no disponible | Prometheus | réplicas disponibles < 1 (pasan `/health/ready`, que prueba la BD) | 2m | Alerta |
+| API /rutas lenta | Prometheus | p95 de `/api/v1/rutas` en 10 min > 2 s | 5m | OK |
+| BD por encima del 80 % de su disco | SQL + Prometheus | `pg_database_size` / tamaño solicitado del PVC > 80 % | 10m | NoData |
+
+**Por qué así:**
+- **Ritmo de cuota = 100 % del ritmo uniforme**, no un porcentaje arbitrario: `presupuesto.py` planifica con el
+  90 % repartido entre los días restantes, así que el ETL solo nunca lo supera. Pasarlo significa otro consumidor
+  de la misma key (el ETL de Compose encendido, un script) o un bug del presupuesto. Las cuotas van fijas en el SQL
+  de la regla; mantenerlas alineadas con `TOMTOM_CUOTA_MENSUAL` / `TOMTOM_TILES_CUOTA_MENSUAL`.
+- **Disco con SQL ÷ PVC y no con `kubelet_volume_stats`:** en k3d los volúmenes local-path son directorios del
+  host y kubelet reporta el disco entero (~1 TB, 10 % usado), no el PVC. El tamaño de la BD frente a lo solicitado
+  funciona igual en local y en Azure Disk (donde el tamaño sí es real). No cuenta el WAL; el 20 % restante lo cubre.
+- **p95 con `and on() … > 0`:** sin tráfico el cuantil es NaN; así queda "sin datos" (OK) en lugar de un valor
+  indefinido.
+- **"ETL sin datos de tiles" exige ≥ 3 ciclos (`HAVING`):** al encender el equipo hay 0–2 filas recientes; sin
+  ese mínimo dispararía junto con "ETL sin correr" por la misma causa.
+- **Sin `postgres_exporter` por ahora:** las alertas de BD que pide el plan se cubren con SQL; el exportador
+  (conexiones, locks, compresión) queda para cuando haga falta graficarlo.
+**De paso:** `tests/test_asociador_db.py` y `tests/test_rol_grafana_db.py` usaban timestamps fijos (9 y 13 de
+noviembre). Al cumplir 7 días, la política de compresión (008) empezó a comprimir esos chunks en la BD temporal
+mientras el test insertaba → *deadlock*. Ahora usan una hora reciente relativa a `now()`.
+**Verificado (k3d, 2026-11-17):**
+- **Tests:** `test_ejecuciones.py` (8) y `test_ejecuciones_db.py` (4); suite ETL 180/180.
+- **Ciclo real (16:45 UTC):** fila `ok`, 15 031 aristas, 49 peticiones de tiles, 7 de Segment Data, predictor, 9.8 s,
+  `pod = geotracker-etl-29915565-qks4m`. Panel "ETL: últimos ciclos" la muestra.
+- **Reglas:** las 7 cargadas (`provenance: file`), salud `ok`, estado Normal; las de `consumo_api` crean una
+  instancia por API. Valores al verificar: ritmo Segment Data 28 %, tiles 12 %; BD 10.6 % del PVC; p95 `/rutas`
+  0.48 s (8 peticiones reales; la etiqueta `handler="/api/v1/rutas"` existe).
+- **Disparo de una regla SQL:** copia temporal de "Consumo por encima del ritmo" con umbral 0 → dos alertas
+  Alerting ("tomtom_flow_segment va al 28 % del ritmo mensual", "…vector_tiles va al 12 %…"); borrada después.
+- **Reemplazo del ConfigMap:** `grafana-alertas-etl` → `grafana-alertas`. Al borrar el viejo, el sidecar quitó
+  `etl.yaml` y lo reescribió desde el nuevo (mismo nombre de archivo): la regla "ETL sin correr" siguió cargada.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

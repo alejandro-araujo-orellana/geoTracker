@@ -1,0 +1,105 @@
+# ============================================================================
+# Grafana alert rules — TomTom quotas (D31, D41)
+# ============================================================================
+# Both read consumo_api (migration 009): one row per local day (America/
+# Mexico_City) and API, written by src/presupuesto.py. SQL alerts are
+# multi-dimensional: the text column `api` becomes a label, one alert per API.
+# ============================================================================
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: geotracker-tomtom
+    folder: geoTracker
+    interval: 5m
+    rules:
+      # A 403 = quota exhausted or invalid key. presupuesto.py already stops
+      # calling that API for the rest of the day; this makes it visible.
+      - uid: tomtom-403
+        title: TomTom respondió 403
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: timescaledb
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT api, CAST(bloqueado AS integer) AS bloqueado
+                FROM consumo_api
+                WHERE fecha = CAST(now() AT TIME ZONE 'America/Mexico_City' AS date)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        # No rows yet today (first cycle not run) is normal.
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+          servicio: tomtom
+        annotations:
+          summary: TomTom respondió 403 a {{ $labels.api }}
+          description: >-
+            Cuota agotada o API key inválida para {{ $labels.api }}. El ETL dejó de llamar a esa API
+            hasta mañana (hora de SLP). Revisar el consumo del mes en consumo_api y la key en el Secret.
+
+      # The ETL plans with 90 % of the quota spread over the remaining days
+      # (presupuesto.py), so on its own it never goes above the even pace
+      # cuota * day / days_in_month. Above 100 % = something outside the budget
+      # is spending (Compose ETL switched on, a script, a bug).
+      # Quotas: keep in sync with TOMTOM_CUOTA_MENSUAL / TOMTOM_TILES_CUOTA_MENSUAL.
+      - uid: tomtom-cuota-ritmo
+        title: Consumo de TomTom por encima del ritmo
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: timescaledb
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH cuotas(api, cuota) AS (
+                    VALUES ('tomtom_flow_segment', 20000), ('tomtom_flow_vector_tiles', 200000)
+                ), hoy AS (
+                    SELECT CAST(now() AT TIME ZONE 'America/Mexico_City' AS date) AS d
+                )
+                SELECT c.api,
+                       100.0 * COALESCE(sum(u.peticiones), 0)
+                       / (c.cuota * EXTRACT(DAY FROM h.d)
+                          / EXTRACT(DAY FROM date_trunc('month', h.d) + INTERVAL '1 month - 1 day')) AS pct_del_ritmo
+                FROM cuotas c
+                CROSS JOIN hoy h
+                LEFT JOIN consumo_api u
+                       ON u.api = c.api AND u.fecha >= date_trunc('month', h.d) AND u.fecha <= h.d
+                GROUP BY c.api, c.cuota, h.d
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [100] }
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+          servicio: tomtom
+        annotations:
+          summary: "{{ $labels.api }} va al {{ printf \"%.0f\" $values.A.Value }} % del ritmo mensual"
+          description: >-
+            El consumo acumulado del mes de {{ $labels.api }} supera la parte proporcional de la cuota hasta
+            hoy. El ETL solo no puede causarlo: buscar otro consumidor de la misma key (¿ETL de Compose
+            encendido? ¿script?).

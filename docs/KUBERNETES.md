@@ -1,8 +1,9 @@
 # Kubernetes — plan e implementación del milestone
 
-> **Actualización 2026-11-17:** primera alerta como código: "ETL sin correr" (D40), dashboard rehecho sobre
-> datos de tiles (D36–D38, D40) y memoria de PostgreSQL acorde al límite del pod (D39). Faltan `ejecuciones_etl`,
-> el resto de las alertas iniciales, un punto de contacto que notifique fuera de Grafana y el histórico (fase 4).
+> **Actualización 2026-11-17:** alertas como código: las 5 iniciales + "ETL sin datos de tiles" (D40, D41); tabla
+> `ejecuciones_etl` (D41); dashboard rehecho sobre datos de tiles (D36–D38, D40) y memoria de PostgreSQL acorde al
+> límite del pod (D39). Faltan un punto de contacto que notifique fuera de Grafana, `postgres_exporter` y el
+> histórico (fase 4).
 >
 > **Actualización 2026-11-14:** fase 3 en curso en k3d. Ya están Prometheus + Grafana (`kube-prometheus-stack`), los
 > dashboards como código, el rol `grafana_ro` y la API scrapeada (D31–D33); ver "Observabilidad: operación".
@@ -314,7 +315,8 @@ administren lo mismo (cada una "corrige" el estado de la otra: *drift*).
   | BD | Conexiones, tamaño, locks, chunks/compresión | `postgres_exporter` |
   | Cluster | CPU/memoria de pods, reinicios, PVCs | Incluido en el chart |
 
-- **Alertas iniciales:** sin ciclo exitoso del ETL en 45 min (**hecha**, D40: `platform/grafana/alerts/etl.yaml`); consumo de cuota por encima del ritmo diario;
+- **Alertas iniciales — todas hechas (D40, D41)** en `platform/grafana/alerts/` (`etl`, `tomtom`, `api`, `bd`.yaml),
+  más "ETL sin datos de tiles" sobre `ejecuciones_etl`. El plan original: sin ciclo exitoso del ETL en 45 min; consumo de cuota por encima del ritmo diario;
   cualquier 403 de TomTom; API no sana o p95 de `/rutas` > 2 s; PVC de la BD > 80 %.
 - **Costo:** el stack pide ~1–2 GB de RAM; en local, configuración reducida (sin réplicas, retención corta).
 - **Retención:** corta (7–15 días) para operación; el histórico de tráfico sigue en TimescaleDB.
@@ -368,8 +370,9 @@ kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus
   `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <contenedor>`.
 - **Al reactivar el cluster** el ETL retoma solo en el siguiente `*/15`, pero lo no medido mientras estuvo apagado se
   pierde (2026-11-14 08:00 → 2026-11-16 07:46 UTC). La alerta "ETL sin correr" (D40) lo marca.
-- **Alertas (D40):** reglas en `deploy/k8s/platform/grafana/alerts/` (ConfigMap con `grafana_alert=1`, cargado por el
-  sidecar de alertas; en la UI son de solo lectura). Estado en Grafana → Alerting → Alert rules (carpeta geoTracker).
+- **Alertas (D40, D41):** reglas en `deploy/k8s/platform/grafana/alerts/`, un archivo por dominio, todas en el
+  ConfigMap `grafana-alertas` (`grafana_alert=1`, cargado por el sidecar de alertas; en la UI son de solo lectura).
+  Agregar una regla: nuevo archivo o regla con `uid` único → listarlo en `platform/kustomization.yaml` → `apply -k`. Estado en Grafana → Alerting → Alert rules (carpeta geoTracker).
   **Con el equipo apagado a diario:** al encender, el último éxito tiene horas → "ETL sin correr" dispara ~2 min
   después de que arranca Grafana y se resuelve sola tras el primer ciclo (siguiente `*/15`). Si no se resuelve en
   ~20 min, el `CronJob` se saltó el ciclo (p. ej. al reanudar de una suspensión fuera de `startingDeadlineSeconds`)
