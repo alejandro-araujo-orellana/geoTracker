@@ -30,3 +30,12 @@ configMapGenerator:
         grafana_dashboard: "1"
       annotations:
         grafana_folder: geoTracker
+  # Alert rules (D40), picked up by the Grafana alerts sidecar (label grafana_alert=1).
+  - name: grafana-alertas-etl
+    namespace: monitoring
+    files:
+      - grafana/alerts/etl.yaml
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_alert: "1"

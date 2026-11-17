@@ -515,6 +515,28 @@ configuración dentro del PVC, fuera de git.
 **Pendiente:** si el pico real crece con el histórico, subir el límite a 1.5 Gi antes que bajar `shared_buffers`.
 En CloudNativePG (fase 2) estos valores van en `spec.postgresql.parameters`.
 
+## D40 — Alerta "ETL sin correr" como código, panel de estado del ETL y peso del panel 3 (2026-11-17)
+**Decisión:**
+- **Alerta:** regla de Grafana provisionada desde `deploy/k8s/platform/grafana/alerts/etl.yaml` (ConfigMap con
+  `grafana_alert=1`; sidecar de alertas activado en `values.yaml`). Consulta Prometheus:
+  `(time() - max(kube_cronjob_status_last_successful_time{cronjob="geotracker-etl"})) / 60 > 45`, evaluada cada
+  1 min con `for: 2m`. `noDataState: Alerting`: sin la serie (kube-state-metrics caído o el CronJob borrado) no se
+  puede afirmar que el ETL corre.
+- **Panel 4:** "ETL: minutos desde el último ciclo exitoso", la misma expresión como stat (verde < 20, naranja < 45,
+  rojo ≥ 45).
+- **Panel 3:** el peso del heatmap es `least(greatest(congestión − 1, 0), 1.5)` con rango fijo 0–1.5. Con la
+  congestión cruda (≥ 1) todas las celdas pesaban casi igual y el mapa mostraba densidad de calles, no tráfico.
+**Por qué 45 min y `for: 2m`:** 3 ciclos perdidos de `*/15` (umbral de "Alertas iniciales" en `KUBERNETES.md`): un
+Job lento o un ciclo saltado no alerta; una caída real sí. El equipo se apaga a diario: al encender, la alerta
+dispara ~2 min después de que Grafana arranca y se resuelve tras el primer ciclo. Es correcto (esas horas no tienen
+datos) y sirve como prueba diaria de que la cadena métrica → regla → estado funciona.
+**Sin punto de contacto todavía:** el de por defecto es correo sin SMTP; las alertas solo se ven en Grafana
+(Alerting → Alert rules). Elegir un canal (correo con SMTP, Telegram, Discord, ntfy…) es la siguiente decisión.
+**Verificado (k3d):** la regla carga con `provenance: file` en la carpeta geoTracker y se evalúa sin error (estado
+Normal, 1–2 min desde el último ciclo). Camino de disparo: una copia temporal con umbral 0 pasó a **Alerting** con
+la descripción renderizada ("…hace 1 min…") y se borró. Captura del dashboard: panel 4 en verde ("2 min"), panel 3
+con focos de congestión en lugar de un manto uniforme. BD sin reinicios.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

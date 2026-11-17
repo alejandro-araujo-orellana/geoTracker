@@ -394,7 +394,7 @@
         "spec": {
           "id": 3,
           "title": "Congestión inferida (último ciclo)",
-          "description": "",
+          "description": "Congestión del último ciclo en todas las calles (medidas + inferidas por IDW), agregada en celdas de ~200 m. El calor es el exceso sobre flujo libre (congestión − 1, tope 1.5): las zonas libres no pintan (D40).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -415,7 +415,7 @@
                         "editorMode": "code",
                         "format": "table",
                         "rawQuery": true,
-                        "rawSql": "-- Congestión inferida del ÚLTIMO ciclo del predictor dentro del rango (trafico_calles, D13).\n-- Reemplaza la consulta a trafico_inferido (IDW_GRID, legado P10: ya no se escribe ni existe en el cluster).\n-- Un ciclo son ~67 k calles; se agregan en celdas de 0.002° (~200 m) → ~3.3 k puntos para el navegador (D33).\n-- nivel_congestion_inf: 1 = flujo libre; mayor = más congestión.\nWITH puntos AS (\n    SELECT t.timestamp_calculo,\n           t.nivel_congestion_inf,\n           ST_LineInterpolatePoint(o.geom, 0.5) AS p\n    FROM trafico_calles t\n    JOIN dim_calles_osm o ON o.osm_id = t.osm_id\n    WHERE t.timestamp_calculo = (\n        SELECT max(timestamp_calculo) FROM trafico_calles WHERE $__timeFilter(timestamp_calculo)\n    )\n)\nSELECT\n    max(timestamp_calculo)     AS \"time\",\n    avg(nivel_congestion_inf)  AS \"congestion_inferida\",\n    avg(ST_Y(p))               AS latitude,\n    avg(ST_X(p))               AS longitude\nFROM puntos\nGROUP BY round(ST_Y(p)::numeric / 0.002), round(ST_X(p)::numeric / 0.002);",
+                        "rawSql": "-- Congestión inferida del ÚLTIMO ciclo del predictor dentro del rango (trafico_calles, D13).\n-- Reemplaza la consulta a trafico_inferido (IDW_GRID, legado P10: ya no se escribe ni existe en el cluster).\n-- Un ciclo son ~67 k calles; se agregan en celdas de 0.002° (~200 m) → ~3.3 k puntos para el navegador (D33).\n-- nivel_congestion_inf: 1 = flujo libre; mayor = más congestión.\nWITH puntos AS (\n    SELECT t.timestamp_calculo,\n           t.nivel_congestion_inf,\n           ST_LineInterpolatePoint(o.geom, 0.5) AS p\n    FROM trafico_calles t\n    JOIN dim_calles_osm o ON o.osm_id = t.osm_id\n    WHERE t.timestamp_calculo = (\n        SELECT max(timestamp_calculo) FROM trafico_calles WHERE $__timeFilter(timestamp_calculo)\n    )\n)\nSELECT\n    max(timestamp_calculo)     AS \"time\",\n    avg(nivel_congestion_inf)  AS \"congestion_inferida\",\n    -- Peso del heatmap (D40): exceso sobre flujo libre, con tope para que las cerradas (10) no saturen la escala.\n    least(greatest(avg(nivel_congestion_inf) - 1, 0), 1.5) AS peso,\n    avg(ST_Y(p))               AS latitude,\n    avg(ST_X(p))               AS longitude\nFROM puntos\nGROUP BY round(ST_Y(p)::numeric / 0.002), round(ST_X(p)::numeric / 0.002);",
                         "sql": {
                           "columns": [
                             {
@@ -467,10 +467,10 @@
                 "layers": [
                   {
                     "config": {
-                      "blur": 15,
-                      "radius": 5,
+                      "blur": 18,
+                      "radius": 8,
                       "weight": {
-                        "field": "congestion_inferida",
+                        "field": "peso",
                         "fixed": 1,
                         "max": 1,
                         "min": 0
@@ -481,7 +481,7 @@
                       "longitude": "longitude",
                       "mode": "coords"
                     },
-                    "name": "Layer 1",
+                    "name": "Exceso de congestión",
                     "tooltip": true,
                     "type": "heatmap"
                   }
@@ -524,6 +524,113 @@
                       "tooltip": false,
                       "viz": false
                     }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "peso"
+                    },
+                    "properties": [
+                      {
+                        "id": "min",
+                        "value": 0
+                      },
+                      {
+                        "id": "max",
+                        "value": 1.5
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "ETL: minutos desde el último ciclo exitoso",
+          "description": "kube_cronjob_status_last_successful_time del CronJob geotracker-etl (kube-state-metrics). Corre cada 15 min; > 45 min dispara la alerta \"ETL sin correr\" (D40).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "prometheus"
+                      },
+                      "spec": {
+                        "expr": "(time() - max(kube_cronjob_status_last_successful_time{namespace=\"geotracker\", cronjob=\"geotracker-etl\"})) / 60",
+                        "instant": true,
+                        "range": false,
+                        "legendFormat": "minutos"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "textMode": "value",
+                "orientation": "auto",
+                "wideLayout": true,
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "m",
+                  "decimals": 0,
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "sin dato",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 20,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 45,
+                        "color": "red"
+                      }
+                    ]
                   }
                 },
                 "overrides": []
@@ -573,6 +680,19 @@
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-3"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 8,
+              "width": 6,
+              "height": 5,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4"
               }
             }
           }

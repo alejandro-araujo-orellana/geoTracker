@@ -72,6 +72,12 @@ grafana:
       folderAnnotation: grafana_folder
       provider:
         foldersFromFilesStructure: true
+    # Alert rules as code (D31, D40): ConfigMaps labelled grafana_alert=1 in this
+    # namespace (platform/grafana/alerts) are provisioned and hot-reloaded.
+    alerts:
+      enabled: true
+      label: grafana_alert
+      labelValue: "1"
 
   # Business data (D31): TimescaleDB with the read-only role grafana_ro (D33).
   # Direct to the DB, not through PgBouncer (transaction pooling + prepared statements).
