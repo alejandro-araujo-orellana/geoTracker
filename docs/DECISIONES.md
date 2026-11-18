@@ -584,6 +584,35 @@ mientras el test insertaba → *deadlock*. Ahora usan una hora reciente relativa
 - **Reemplazo del ConfigMap:** `grafana-alertas-etl` → `grafana-alertas`. Al borrar el viejo, el sidecar quitó
   `etl.yaml` y lo reescribió desde el nuevo (mismo nombre de archivo): la regla "ETL sin correr" siguió cargada.
 
+## D42 — Notificaciones push al celular con ntfy (2026-11-17)
+**Decisión:** punto de contacto de Grafana `ntfy-celular` (webhook) hacia `https://ntfy.sh/<tema>`, más la política
+de notificación (todas las alertas a ese punto) y una plantilla de mensaje, provisionados desde git en
+`platform/grafana/alerts/notificaciones.yaml` (mismo ConfigMap `grafana-alertas`). El tema va en `grafana.env`
+(`NTFY_URL`, fuera de git) y llega al pod por `envValueFrom`; Grafana lo interpola en el archivo (`${NTFY_URL}`).
+- **Formato:** el webhook manda el JSON de Grafana; ntfy, con `?tpl=1&t={{.title}}&m={{.message}}`, toma título y
+  cuerpo de ese JSON. Título: `🔴 <regla>` o `✅ Resuelta: <regla>` (usa `rulename` cuando Grafana renombra la
+  alerta a `DatasourceNoData`/`DatasourceError`); cuerpo: `summary` + `description`.
+- **Agrupación:** por carpeta y regla; `group_wait` 30 s, `repeat_interval` 4 h (una alerta que sigue disparando
+  se repite cada 4 h, no en cada evaluación).
+- **Sin silencio al arrancar:** el par diario "ETL sin correr" → "Resuelta" sirve de aviso de que el cluster volvió.
+- **"BD por encima del 80 %": sin datos pasa de NoData a OK.** Con el punto de contacto activo apareció un falso
+  `DatasourceNoData`: el equipo se suspendió (huecos en todas las series de Prometheus, 02:08–02:26 y 03:53–04:27
+  UTC) y las dos evaluaciones de esa regla (cada 10 min) cayeron en el hueco. El disco crece despacio y una BD
+  ausente ya la avisan "API no disponible" y "ETL sin correr".
+**Por qué ntfy:** gratis, sin cuenta, app Android/iOS, y acepta un POST simple. Alternativas: Telegram (bot +
+token), correo (requiere SMTP), Pushover (de pago).
+**Riesgos:**
+- **El tema es la credencial** en `ntfy.sh` público: quien lo conozca lee y publica en él. El tema actual
+  (`geotracker`) es corto y adivinable; el contenido son nombres de reglas y valores, sin secretos. Para cambiarlo:
+  nuevo tema en la app → `NTFY_URL` en `grafana.env` → `apply -k` → `kubectl rollout restart deployment/kps-grafana
+  -n monitoring`.
+- **Si el equipo está apagado o colgado no hay aviso:** Grafana corre en el mismo equipo. Cubrirlo requiere un
+  vigilante externo (*dead man's switch*, p. ej. healthchecks.io); queda para la fase en la nube.
+**Verificado (k3d, 2026-11-17):** contacto, política y plantilla cargados (`provenance: file`, URL interpolada);
+regla temporal que siempre dispara → push `🔴 PRUEBA notificación al celular` ~2.5 min después; con umbral
+inalcanzable → `✅ Resuelta: …`. **Borrar el ConfigMap no borra una regla provisionada:** queda en la BD de
+Grafana; se elimina con un archivo `deleteRules` (uid) y después se borra ese ConfigMap.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

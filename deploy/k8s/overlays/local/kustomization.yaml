@@ -43,7 +43,7 @@ secretGenerator:
     namespace: geotracker
     envs:
       - secret.env
-  # grafana.env — GF_SECURITY_ADMIN_USER, GF_SECURITY_ADMIN_PASSWORD, GRAFANA_DB_PASSWORD.
+  # grafana.env — GF_SECURITY_ADMIN_USER, GF_SECURITY_ADMIN_PASSWORD, GRAFANA_DB_PASSWORD, NTFY_URL.
   # The same file feeds both namespaces, so the read-only DB password set by the
   # migrations Job (geotracker) and the one Grafana uses (monitoring) cannot drift. D33.
   - name: grafana-secret

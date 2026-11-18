@@ -58,6 +58,11 @@ grafana:
       secretKeyRef:
         name: grafana-secret
         key: GRAFANA_DB_PASSWORD
+    # ntfy topic URL for the phone contact point (D42, platform/grafana/alerts/notificaciones.yaml).
+    NTFY_URL:
+      secretKeyRef:
+        name: grafana-secret
+        key: NTFY_URL
 
   # Users, preferences and alert state survive pod restarts. Dashboards and
   # datasources do not depend on it: they are provisioned from git.

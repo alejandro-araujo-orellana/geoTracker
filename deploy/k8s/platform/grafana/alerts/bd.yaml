@@ -1,5 +1,5 @@
 # ============================================================================
-# Grafana alert rules — database disk (D31, D41)
+# Grafana alert rules — database disk (D31, D41, D42)
 # ============================================================================
 # kubelet_volume_stats does not work for this in k3d: local-path volumes are
 # host directories, so used/capacity is the whole host disk (~1 TB), not the
@@ -50,7 +50,11 @@ groups:
               expression: C
               conditions:
                 - evaluator: { type: gt, params: [80] }
-        noDataState: NoData
+        # OK, not NoData (D42): on a machine that suspends, the 10-min evaluations
+        # that land in the scrape gap find no series and pushed a false
+        # "DatasourceNoData" on wake-up. The disk grows slowly; a missing DB is
+        # already covered by "API no disponible" and "ETL sin correr".
+        noDataState: OK
         execErrState: Error
         for: 10m
         labels:

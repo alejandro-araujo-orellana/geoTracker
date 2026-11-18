@@ -1,0 +1,56 @@
+# ============================================================================
+# Grafana alerting — where notifications go (D42)
+# ============================================================================
+# Contact point: push to the phone through ntfy (ntfy.sh, app subscribed to the
+# topic). Grafana's webhook POSTs its JSON payload; ntfy's message templating
+# (tpl=1) takes the push title and body from the payload's "title" and
+# "message" fields, which the templates below render. Title: rule name
+# (rulename) when Grafana renames the alert to DatasourceNoData/DatasourceError.
+#
+# The topic URL comes from grafana.env (NTFY_URL, untracked) through the pod
+# environment: whoever knows the topic can read and publish to it.
+#
+# Provisioning "policies" REPLACES the whole notification policy tree: every
+# alert goes to the phone. No mute window after boot on purpose (D42): the daily
+# "ETL sin correr" + "Resuelta" pair doubles as "the cluster came back up".
+# ============================================================================
+apiVersion: 1
+
+templates:
+  - orgId: 1
+    name: geotracker-ntfy
+    template: |
+      {{ define "geotracker.ntfy.title" -}}
+      {{ if eq .Status "firing" }}🔴 {{ else }}✅ Resuelta: {{ end }}{{ or .CommonLabels.rulename .CommonLabels.alertname }}
+      {{- end }}
+      {{ define "geotracker.ntfy.message" -}}
+      {{ range .Alerts -}}
+      {{ .Annotations.summary }}
+      {{ if eq .Status "firing" }}{{ .Annotations.description }}
+      {{ end }}
+      {{ end -}}
+      {{- end }}
+
+contactPoints:
+  - orgId: 1
+    name: ntfy-celular
+    receivers:
+      - uid: ntfy-celular
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          # tpl=1&t={{.title}}&m={{.message}}, URL-encoded.
+          url: ${NTFY_URL}?tpl=1&t=%7B%7B.title%7D%7D&m=%7B%7B.message%7D%7D
+          httpMethod: POST
+          maxAlerts: 10
+          title: '{{ template "geotracker.ntfy.title" . }}'
+          message: '{{ template "geotracker.ntfy.message" . }}'
+
+policies:
+  - orgId: 1
+    receiver: ntfy-celular
+    group_by: [grafana_folder, alertname]
+    group_wait: 30s
+    group_interval: 5m
+    # A still-firing alert is pushed again every 4 h, not every evaluation.
+    repeat_interval: 4h

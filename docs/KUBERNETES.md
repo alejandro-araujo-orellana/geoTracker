@@ -370,14 +370,19 @@ kubectl port-forward -n monitoring svc/kps-prometheus 9090:9090     # Prometheus
   `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <contenedor>`.
 - **Al reactivar el cluster** el ETL retoma solo en el siguiente `*/15`, pero lo no medido mientras estuvo apagado se
   pierde (2026-11-14 08:00 → 2026-11-16 07:46 UTC). La alerta "ETL sin correr" (D40) lo marca.
-- **Alertas (D40, D41):** reglas en `deploy/k8s/platform/grafana/alerts/`, un archivo por dominio, todas en el
+- **Alertas (D40–D42):** reglas en `deploy/k8s/platform/grafana/alerts/`, un archivo por dominio, todas en el
   ConfigMap `grafana-alertas` (`grafana_alert=1`, cargado por el sidecar de alertas; en la UI son de solo lectura).
   Agregar una regla: nuevo archivo o regla con `uid` único → listarlo en `platform/kustomization.yaml` → `apply -k`. Estado en Grafana → Alerting → Alert rules (carpeta geoTracker).
   **Con el equipo apagado a diario:** al encender, el último éxito tiene horas → "ETL sin correr" dispara ~2 min
   después de que arranca Grafana y se resuelve sola tras el primer ciclo (siguiente `*/15`). Si no se resuelve en
   ~20 min, el `CronJob` se saltó el ciclo (p. ej. al reanudar de una suspensión fuera de `startingDeadlineSeconds`)
-  o el Job falla: `kubectl get cronjob,jobs -n geotracker`. **Sin punto de contacto configurado** las alertas solo
-  se ven en Grafana (el de por defecto es un correo sin SMTP).
+  o el Job falla: `kubectl get cronjob,jobs -n geotracker`. Cada cambio de estado llega al celular
+  por ntfy (D42).
+- **Notificaciones (D42):** punto de contacto `ntfy-celular` y política en `platform/grafana/alerts/notificaciones.yaml`;
+  el tema en `NTFY_URL` (`grafana.env`). Cambiar de tema: editar `grafana.env`, `apply -k` y
+  `kubectl rollout restart deployment/kps-grafana -n monitoring`. Probar: regla temporal que siempre dispara en un
+  ConfigMap aparte (`grafana_alert=1`). **Quitar una regla provisionada:** borrar el archivo/ConfigMap no basta (queda
+  en la BD de Grafana); aplicar un archivo con `deleteRules: [{orgId: 1, uid: <uid>}]` y después borrarlo.
 - **Memoria de la BD (D39):** los parámetros de memoria van como `args` del StatefulSet (sobrescriben el
   `postgresql.conf` del volumen). Si se cambia `limits.memory`, ajustarlos juntos.
 - **Imágenes a k3d:** importar **una por comando**. Con dos en el mismo `k3d image import` se quedó la versión

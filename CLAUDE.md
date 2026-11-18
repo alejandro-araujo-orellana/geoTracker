@@ -165,6 +165,6 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
 3. Observabilidad (fase 3, D31): sondas y `/metrics` en la API (D32); stack, Grafana 13.0.2, rol `grafana_ro` y
    dashboard versionado en k3d (D33); dashboard sobre tiles (D36–D38, D40); alertas como código y tabla
-   `ejecuciones_etl` (D40, D41). Sigue: punto de contacto (notificaciones), `postgres_exporter`, histórico (fase 4).
+   `ejecuciones_etl` (D40, D41); notificaciones al celular con ntfy (D42). Sigue: `postgres_exporter`, histórico (fase 4).
 4. Infra: Compose v5 con `restart`, imágenes fijas y credenciales en `.env` (D17). Siguiente milestone (otra rama): despliegue en Kubernetes — **empezar leyendo `docs/KUBERNETES.md`** (análisis, decisiones abiertas y plan por fases).
 5. Esquema: P1–P9 y P11 resueltos. Pendiente: P10 (`trafico_inferido` legado; revisar paneles de Grafana antes de borrarla).
