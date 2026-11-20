@@ -13,3 +13,5 @@ deploy/k8s/**/secret.env
 deploy/k8s/**/grafana.env
 # Metadatos que Windows agrega a archivos descargados
 *:Zone.Identifier
+# Desde WSL los ":" de Windows llegan como U+F03A, que el patrón anterior no cubre
+*Zone.Identifier

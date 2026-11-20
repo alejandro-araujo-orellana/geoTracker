@@ -94,7 +94,7 @@ La geometría de los tiles no se guarda.
 ### `dim_calles_osm` — red vial completa de OSM (aristas del grafo)
 | Columna | Tipo | Notas |
 |---|---|---|
-| `osm_id` | `bigint` PK | ID estable. Filas nuevas: `blake2b("u_v_k")` (63 bits). Las 24 574 filas cargadas antes del 2026-11-09 conservan su ID original para no romper el histórico |
+| `osm_id` | `bigint` PK | ID estable: `blake2b("u_v_k")` (63 bits). En el cluster lo es para toda la red. En la BD de Compose, las 24 574 filas cargadas antes del 2026-11-09 conservan su ID original; al traer ese histórico al cluster se tradujo por `(u,v,k)` (D43) |
 | `u`, `v`, `k` | `bigint`, `bigint`, `integer` | **Clave natural** (único `uq_calles_osm_uvk`): nodo OSM inicial, nodo OSM final, índice de arista paralela |
 | `id` | `bigint` NOT NULL, serial | ID de arista para pgRouting |
 | `nombre` | `text` | NULL si no tiene nombre. Si OSM tiene varios, se guarda el primero en orden alfabético |
@@ -263,5 +263,5 @@ Los roles son globales al servidor de PostgreSQL, no a la BD.
 | P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
 | P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
 | P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
-| P10 | `trafico_inferido` obsoleta | Ruido en el esquema | El dashboard versionado ya no la usa: su panel de mapa de calor lee `trafico_calles` (D33). Solo la consulta el Grafana de Compose. En el cluster ni siquiera existe. Eliminarla de la BD de Compose al retirar ese Grafana (fase 4) |
+| P10 | `trafico_inferido` obsoleta | Ruido en el esquema | El dashboard versionado ya no la usa: su panel de mapa de calor lee `trafico_calles` (D33). Solo la consulta el Grafana de Compose. En el cluster ni siquiera existe. Eliminarla de la BD de Compose al retirar ese Grafana (fase 4) — el Grafana de Compose está apagado (D35) y el histórico ya está en el cluster (D43): se resuelve al retirar la BD de Compose |
 | P11 | ✅ **Resuelto en el ruteo** — auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original); `v_costos_grafo` los excluye. Siguen en la tabla (inofensivos) | — | Migración 011 |

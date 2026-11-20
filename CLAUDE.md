@@ -161,7 +161,8 @@ Secretos por variables de entorno (`.env` → `docker-compose.yml` → contenedo
 ## Estado actual y prioridades
 
 1. **ETL encendido desde 2026-11-09 21:21 UTC** acumulando datos; desde 2026-11-13 17:15 UTC corre como `CronJob`
-   en k3d (D29) y el de Compose está apagado: el histórico previo sigue en la BD de Compose (y Grafana también) (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
+   en k3d (D29) y el de Compose está apagado; el histórico previo (desde 2026-06) ya está en el cluster (fase 4, D43:
+   `deploy/k8s/scripts/migrar_historico_compose.sh`) (vector tiles + Segment Data, ciclo ~12 s cada 15 min). Pendiente: confirmar en los términos de TomTom el almacenamiento de datos derivados de tiles. Cuotas: tiles 200 000/mes, Segment Data 20 000/mes, ambas con pool en `consumo_api`.
 2. Ruteo: expuesto en `GET /api/v1/rutas` (D16). Pendiente: validar ETAs contra datos de varios días y calibrar `dim_velocidad_tipo_via`.
 3. Observabilidad (fase 3, D31): sondas y `/metrics` en la API (D32); stack, Grafana 13.0.2, rol `grafana_ro` y
    dashboard versionado en k3d (D33); dashboard sobre tiles (D36–D38, D40); alertas como código y tabla

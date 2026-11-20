@@ -1,5 +1,8 @@
 # Kubernetes — plan e implementación del milestone
 
+> **Actualización 2026-11-20:** fase 4 hecha (D43). El histórico de Compose (desde 2026-06) está en el cluster,
+> traducido a sus `osm_id` y verificado contra Compose; ver "Migración de datos". Falta retirar la BD de Compose.
+
 > **Actualización 2026-11-17:** alertas como código: las 5 iniciales + "ETL sin datos de tiles" (D40, D41); tabla
 > `ejecuciones_etl` (D41); dashboard rehecho sobre datos de tiles (D36–D38, D40) y memoria de PostgreSQL acorde al
 > límite del pod (D39). Faltan un punto de contacto que notifique fuera de Grafana, `postgres_exporter` y el
@@ -231,7 +234,7 @@ la caída de la primaria (failover); el acceso sin token es rechazado; costos me
 | Fase | Entregable | Criterio |
 |---|---|---|
 | 3 | Observabilidad: Prometheus + Alertmanager + Grafana único; API instrumentada; métricas del ETL | Alertas funcionando (ciclo fallido, cuota, 403, API, disco) |
-| 4 | Migración de datos de Compose al cluster (pg_dump/pg_restore con la imagen fijada) | Conteos y ruta de prueba idénticos |
+| 4 | ✅ Migración de datos de Compose al cluster (fusión con traducción de `osm_id`, D43) | Conteos y ruta de prueba idénticos |
 | 5 | Afinación de costos en Azure y respaldos automatizados | Crédito controlado; respaldos probados |
 
 ## Dualidad local / nube
@@ -403,10 +406,20 @@ y agentes permanentes y chocaría con Kubernetes sobre los nodos.
 
 ## Migración de datos
 
-Los datos acumulados en Compose se trasladan con `pg_dump -Fc` y `pg_restore` en la BD del cluster, usando **la
-misma imagen fijada** para no mezclar versiones de extensiones. Verificar después: conteos por tabla, versiones
-de extensiones, `schema_migrations` y una ruta de prueba. Durante el corte, detener el ETL en Compose para no
-partir los datos entre dos BD. (Fase 4.)
+**Hecha el 2026-11-20 (D43).** El plan original era `pg_dump`/`pg_restore`, pero el cluster ya tenía datos propios y
+su red tiene otros `osm_id` para 24 574 aristas. Por eso el histórico anterior al corte se **fusionó** traduciendo
+`osm_id` por `(u,v,k)`:
+
+```bash
+deploy/k8s/scripts/migrar_historico_compose.sh     # respaldo → extracción → fase4 → fusión → cagg → compresión → verificación
+```
+
+Lee Compose sin modificarla, deja un respaldo del cluster en `~/geotracker-respaldos/` y termina comparando por día
+(conteos y sumas exactas) contra Compose. Es re-ejecutable: si el histórico ya está, solo repite la verificación.
+Variables: `CORTE`, `FASE4_DIR` (archivos intermedios, `/tmp/fase4`), `RESPALDO_DIR`.
+
+**Siguiente paso:** retirar la BD de Compose (`trafico_db`) y su API, conservando el volumen y el respaldo un tiempo.
+Con eso desaparece también `trafico_inferido` (P10).
 
 ## Riesgos
 

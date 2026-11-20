@@ -613,6 +613,40 @@ regla temporal que siempre dispara → push `🔴 PRUEBA notificación al celula
 inalcanzable → `✅ Resuelta: …`. **Borrar el ConfigMap no borra una regla provisionada:** queda en la BD de
 Grafana; se elimina con un archivo `deleteRules` (uid) y después se borra ese ConfigMap.
 
+## D43 — Fase 4: histórico de Compose al cluster por fusión con traducción de `osm_id` (2026-11-20)
+**Decisión:** el histórico anterior al corte (D29, `2026-11-13 17:15 UTC`) se copia de la BD de Compose a la del
+cluster con `deploy/k8s/scripts/migrar_historico_compose.sh` (+ `fusionar_historico.sql`): respaldo `pg_dump -Fc`
+del cluster → `COPY` de Compose a archivos → tablas de paso `UNLOGGED` en un esquema `fase4` → **una transacción**
+que traduce `osm_id` e inserta → refresco de `resumen_trafico_ciclo` → compresión de chunks > 7 días → verificación
+por día contra Compose. Compose solo se lee. Re-ejecutable: si el cluster ya tiene datos antes del corte salta la
+fusión, y si `fase4` quedó completo de una corrida anterior reanuda ahí.
+**Por qué no `pg_dump`/`pg_restore` completo (lo que decía el plan):**
+- El cluster ya tenía 7 días de datos propios; un restore completo chocaba con ellos o los reemplazaba.
+- **La misma red tiene otros `osm_id`.** Las 67 464 aristas coinciden por `(u,v,k)`, pero 24 574 conservan en Compose
+  su `osm_id` "adoptado" (migración 004); el cluster, cargado desde cero (D30), usa `blake2b(u,v,k)` en todas. Copiar
+  el histórico tal cual habría fallado por la FK o, peor, colgado lecturas de aristas equivocadas. Se traduce
+  `osm_id(Compose) → (u,v,k) → osm_id(cluster)`; la transacción aborta si alguna arista o lectura queda sin pareja.
+- `consumo_api` ya se había copiado en el corte (D29); no se toca. `trafico_inferido` (legado, P10) no existe en el
+  esquema del cluster y no se copia.
+- Hechos sin `ON CONFLICT`: el rango es anterior al corte y vacío en el cluster; un choque sería un supuesto roto y
+  debe abortar. `dim_segmentos_viales`, con `ON CONFLICT DO NOTHING`: entran los 275 segmentos de Compose que no
+  sobrevivieron a la deduplicación (440 → 207); solo dan nombre a lecturas antiguas (el predictor usa los que tienen
+  lecturas recientes).
+**Problema encontrado:** con 690 MB por stdin, `kubectl exec -i` se quedó colgado *después* de que el `COPY` ya había
+terminado en el servidor. El script ahora manda el flujo comprimido (`gzip | kubectl exec … gunzip | psql`).
+**Verificado (k3d, 2026-11-20):**
+- Respaldo previo: `~/geotracker-respaldos/k8s-antes-fase4-20261120T011225Z.dump` (301 MB, legible con `pg_restore -l`).
+- Copiado: `trafico_calles` 11 573 892 (desde 2026-06-17), `fact_flujo_aristas` 2 460 732 (desde 2026-11-09),
+  `fact_lecturas_trafico` 18 868 (desde 2026-06-10). Fusión ≈ 2 min; el `CronJob` corrió a la vez sin problema.
+- Por día y tabla (27 combinaciones), conteos y sumas exactas en `numeric` **idénticos** a Compose, incluida una suma
+  ponderada por `u` que detectaría una arista mal traducida. Los 482 segmentos de Compose están en el cluster.
+- Ruta de prueba (criterio de la fase): Dijkstra a flujo libre entre los mismos nodos da la misma secuencia de 82
+  nodos y 426.979 s en ambas BD (= `duracion_flujo_libre_s` de la API de Compose); el costo libre de toda la red
+  coincide. Por la API difieren solo por el tráfico: Compose no tiene tráfico vigente, el cluster sí.
+- Segunda corrida: salta la fusión y la verificación vuelve a pasar. BD del cluster: 2.3 → 3.0 GB.
+**Pendiente:** retirar la BD de Compose (la API de Compose sigue encendida contra ella). Con eso se resuelve P10.
+Diferencia observada, no causada por esta fase: pgRouting 4.0.1 en Compose y 4.0.2 en el cluster.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).
