@@ -1,5 +1,8 @@
 # Esquema de Base de Datos — geoTracker
 
+> **BD vigente: `geotracker-db-0` en el cluster** (misma imagen y migraciones). `trafico_db` (Compose) está retirada
+> desde el 2026-11-20 (D44); su histórico se copió al cluster (D43).
+>
 > Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
 > y actualizado tras aplicar las migraciones 001–012 y ampliar la red OSM a la zona única el mismo día.
 > Motor: imagen fija `geotracker-timescaledb:pg15.2-ts2.10.2` (D17).
@@ -23,29 +26,113 @@ Sistemas de referencia usados:
 - **EPSG:4326** (WGS84, grados): toda geometría "de presentación" (`geom`) — lo que consume Grafana y pgRouting.
 - **EPSG:32614** (UTM 14N, metros): cálculos de distancia (IDW, muestreo). Solo en `dim_calles_osm.centroide_m`.
 
-## Diagrama lógico
+## Diagrama lógico (UML: clases)
 
+Esquema vigente (migraciones 001–015, BD del cluster). Línea continua = FK real; punteada = relación lógica sin
+FK. `«hypertable»` = tabla de TimescaleDB particionada por tiempo. `trafico_inferido` (legado, P10) no aparece:
+no existe en el cluster.
+
+```mermaid
+classDiagram
+    direction LR
+    class dim_calles_osm {
+        «dimensión / aristas del grafo»
+        osm_id bigint PK
+        id bigint
+        u bigint
+        v bigint
+        k int
+        source bigint
+        target bigint
+        nombre text
+        tipo_via text
+        longitud_m float8
+        maxspeed_kmh float8
+        oneway bool
+        activo bool
+        geom LineString 4326
+        centroide_m Point 32614
+    }
+    class dim_calles_osm_vertices_pgr {
+        «nodos del grafo»
+        id bigint PK
+        x float8
+        y float8
+        geom Point 4326
+    }
+    class dim_velocidad_tipo_via {
+        tipo_via text PK
+        velocidad_kmh float8
+    }
+    class fact_flujo_aristas {
+        «hypertable»
+        timestamp_lectura timestamptz
+        osm_id bigint FK
+        nivel_relativo float8
+        cerrada bool
+    }
+    class trafico_calles {
+        «hypertable»
+        id bigint
+        timestamp_calculo timestamptz
+        osm_id bigint FK
+        nivel_congestion_inf float8
+        metodo_inferencia text
+    }
+    class resumen_trafico_ciclo {
+        «continuous aggregate»
+        ciclo timestamptz
+        aristas_medidas bigint
+        congestion_promedio float8
+        aristas_congestionadas bigint
+        aristas_cerradas bigint
+    }
+    class dim_segmentos_viales {
+        id_segmento text PK
+        nombre_via text
+        coordenadas_geometria jsonb
+        geom LineString 4326
+    }
+    class fact_lecturas_trafico {
+        «hypertable»
+        timestamp_lectura timestamptz
+        id_segmento text
+        velocidad_actual float8
+        tiempo_recorrido float8
+        nivel_congestion float8
+    }
+    class consumo_api {
+        fecha date PK
+        api text PK
+        peticiones int
+        bloqueado bool
+    }
+    class ejecuciones_etl {
+        inicio timestamptz PK
+        fin timestamptz
+        estado text
+        aristas_medidas int
+        tiles_peticiones int
+        sd_peticiones int
+        predictor bool
+        error text
+        pod text
+    }
+    class schema_migrations {
+        version text PK
+        nombre text
+        aplicada_en timestamptz
+    }
+
+    dim_calles_osm "1" <-- "*" fact_flujo_aristas : osm_id
+    dim_calles_osm "1" <-- "*" trafico_calles : osm_id
+    dim_calles_osm "*" ..> "2" dim_calles_osm_vertices_pgr : source / target
+    dim_calles_osm "*" ..> "0..1" dim_velocidad_tipo_via : tipo_via
+    fact_lecturas_trafico "*" ..> "1" dim_segmentos_viales : id_segmento
+    resumen_trafico_ciclo ..> trafico_calles : agrega TILE cada 15 min
 ```
-                 ┌─────────────────────────┐
-  TomTom ──ETL──▶│ dim_segmentos_viales    │◀── (FK) trafico_inferido  [LEGADO]
-                 │  482 segmentos medidos  │
-                 └───────────┬─────────────┘
-                             │ id_segmento (sin FK)
-                 ┌───────────▼─────────────┐
-                 │ fact_lecturas_trafico   │  hypertable
-                 │  lecturas cada 15 min   │
-                 └───────────┬─────────────┘
-                             │ predictor.py (IDW)
-                             ▼
- OSM ──osmnx_loader──▶ ┌─────────────────────┐        ┌────────────────────────────┐
-                       │ dim_calles_osm      │◀─(FK)──│ trafico_calles  hypertable │
-                       │  67 464 aristas     │        │  congestión inferida/calle │
-                       │  source/target ─────┼──┐     └────────────────────────────┘
-                       └─────────────────────┘  │
-                       ┌─────────────────────────▼──┐
-                       │ dim_calles_osm_vertices_pgr│  28 008 nodos (intersecciones)
-                       └────────────────────────────┘
-```
+
+Tamaños y conteos de cada tabla: en su sección abajo.
 
 ## Tablas
 
@@ -212,9 +299,9 @@ sigue. Tabla normal (~96 filas/día). La leen el panel "ETL: últimos ciclos" y 
 ### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
 `distancia_metros`, `metodo_inferencia` (`IDW_GRID`), `lat`, `lon`.
-152 834 filas, último dato 2026-06-17. No es hypertable. Ya no se escribe. Candidata a eliminarse
-cuando Grafana deje de consultarla: el panel "mapa de calor" del Grafana de Compose todavía la lee, así que ese
-mapa muestra datos de 2026-06-17. El dashboard versionado (D33) ya lee `trafico_calles`.
+152 834 filas, último dato 2026-06-17. No es hypertable. Ya no se escribe. **Retirada (P10, D44):** solo existe en
+la BD de Compose, apagada; no se copió al cluster (D43) y el dashboard versionado (D33) lee `trafico_calles`. Se
+conserva en el volumen `geotracker_datos_postgres` mientras ese volumen exista.
 
 ## Migraciones (`db/migrations/`)
 
@@ -263,5 +350,5 @@ Los roles son globales al servidor de PostgreSQL, no a la BD.
 | P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
 | P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
 | P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
-| P10 | `trafico_inferido` obsoleta | Ruido en el esquema | El dashboard versionado ya no la usa: su panel de mapa de calor lee `trafico_calles` (D33). Solo la consulta el Grafana de Compose. En el cluster ni siquiera existe. Eliminarla de la BD de Compose al retirar ese Grafana (fase 4) — el Grafana de Compose está apagado (D35) y el histórico ya está en el cluster (D43): se resuelve al retirar la BD de Compose |
+| P10 | ✅ `trafico_inferido` obsoleta | Ruido en el esquema | **Resuelto (D44):** no existe en el cluster ni se copió (D43); el Grafana (D35) y la BD de Compose (D44) que la contenían están retirados. Solo queda en el volumen de Compose conservado |
 | P11 | ✅ **Resuelto en el ruteo** — auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original); `v_costos_grafo` los excluye. Siguen en la tabla (inofensivos) | — | Migración 011 |

@@ -1,7 +1,8 @@
 # Kubernetes — plan e implementación del milestone
 
 > **Actualización 2026-11-20:** fase 4 hecha (D43). El histórico de Compose (desde 2026-06) está en el cluster,
-> traducido a sus `osm_id` y verificado contra Compose; ver "Migración de datos". Falta retirar la BD de Compose.
+> traducido a sus `osm_id` y verificado contra Compose; ver "Migración de datos". Compose retirado: BD y API
+> apagadas y todos sus servicios tras perfiles (D44). Sigue la fase 2 (nube) y la decisión de CI/CD.
 
 > **Actualización 2026-11-17:** alertas como código: las 5 iniciales + "ETL sin datos de tiles" (D40, D41); tabla
 > `ejecuciones_etl` (D41); dashboard rehecho sobre datos de tiles (D36–D38, D40) y memoria de PostgreSQL acorde al
@@ -148,6 +149,86 @@ Crecimiento de datos estimado (a verificar): `trafico_calles` ~6.5 M filas/día 
 | Grafana + Prometheus | Chart `kube-prometheus-stack` (Helm), namespace `monitoring` | `platform/kube-prometheus-stack/` | Grafana 13.0.2 con PVC; datasources TimescaleDB (`grafana_ro`) y Prometheus (D33) |
 | Dashboards + ServiceMonitor | `ConfigMap` por dashboard + `ServiceMonitor` | `platform/kustomization.yaml` | Incluido por el overlay; requiere los CRDs del chart |
 | Respaldos | `CronJob` con `pg_dump` | (pendiente) | Hoy manuales; en fase 2 con el operador |
+
+### Despliegue local vigente (UML: despliegue)
+
+Cluster k3d `geotracker` (1 server + 2 agentes, IPs fijas D34) sobre Docker en WSL. Los pods no están fijados a un
+nodo: el diagrama agrupa por namespace. El destino en Azure está en
+`docs/superpowers/specs/2026-11-20-fase2-azure-aks-design.md`.
+
+```mermaid
+flowchart TB
+    subgraph HOST["«dispositivo» PC (WSL, Docker)"]
+        subgraph K3D["«entorno» k3d, 3 nodos"]
+            subgraph NSG["ns geotracker"]
+                ING["«Ingress» Traefik<br/>/api /docs /openapi.json"]
+                APIS["«Service» geotracker-api :80"]
+                API["«Deployment» geotracker-api ×1<br/>+ PDB, sondas /health/live, /health/ready"]
+                PGBS["«Service» pgbouncer :6432"]
+                PGB["«Deployment» pgbouncer ×1"]
+                DB["«StatefulSet» geotracker-db-0<br/>PG 15.2 + TimescaleDB 2.10.2"]
+                PVC[("«PVC» datos-postgres<br/>10Gi local-path")]
+                ETL["«CronJob» geotracker-etl<br/>*/15, Forbid, America/Mexico_City"]
+                MIGJ["«Job» geotracker-migrate"]
+                OSMJ["«Job» geotracker-osm-loader"]
+                SEC["«Secret» geotracker-secret, grafana-secret<br/>«ConfigMap» geotracker-config"]
+            end
+            subgraph NSM["ns monitoring"]
+                PROM["Prometheus"]
+                KSM["kube-state-metrics"]
+                GRAF["Grafana 13.0.2 (PVC)<br/>dashboards + alertas por sidecar"]
+                SM["«ServiceMonitor» API"]
+            end
+        end
+    end
+    CEL["«actor» Usuario"]
+    TT["«servicio» TomTom"]
+    NTFY["«servicio» ntfy.sh → celular"]
+    GEO["«servicio» extracto .osm.pbf"]
+
+    CEL -->|kubectl port-forward| APIS
+    ING -->|"en la nube: HTTPS"| APIS
+    APIS --> API --> PGBS --> PGB --> DB --- PVC
+    ETL --> PGBS
+    MIGJ --> PGBS
+    OSMJ --> PGBS
+    ETL -->|tiles + Segment Data| TT
+    OSMJ -->|descarga| GEO
+    SM -.-> APIS
+    PROM -->|scrape| SM
+    PROM -->|scrape| KSM
+    GRAF --> PROM
+    GRAF -->|grafana_ro, directo :5432| DB
+    GRAF -->|webhook| NTFY
+```
+
+### Ciclo de una alerta (UML: estados)
+
+Cómo evoluciona una regla de Grafana (D40–D42). El caso diario: al encender el equipo, "ETL sin correr" pasa a
+*Firing* y se resuelve sola tras el primer ciclo.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Pendiente: condición verdadera
+    Pendiente --> Normal: condición falsa antes del "for"
+    Pendiente --> Disparando: condición sostenida el tiempo del "for"
+    Disparando --> Normal: condición falsa
+    Normal --> Disparando: sin datos, en "API de rutas no disponible" y "ETL sin correr"
+    note right of Disparando
+        Push "🔴 regla" a ntfy (group_wait 30 s);
+        se repite cada 4 h si sigue disparando.
+    end note
+    note right of Normal
+        Al volver de Disparando:
+        push "✅ Resuelta: regla".
+    end note
+    note left of Normal
+        Sin datos (noDataState): solo esas dos reglas
+        disparan; las otras cinco lo tratan como OK
+        (p. ej. "BD por encima del 80 %", D42).
+    end note
+```
 
 ## Base de datos — decisión tomada (A → B)
 
@@ -418,8 +499,8 @@ Lee Compose sin modificarla, deja un respaldo del cluster en `~/geotracker-respa
 (conteos y sumas exactas) contra Compose. Es re-ejecutable: si el histórico ya está, solo repite la verificación.
 Variables: `CORTE`, `FASE4_DIR` (archivos intermedios, `/tmp/fase4`), `RESPALDO_DIR`.
 
-**Siguiente paso:** retirar la BD de Compose (`trafico_db`) y su API, conservando el volumen y el respaldo un tiempo.
-Con eso desaparece también `trafico_inferido` (P10).
+**Compose retirado (D44, 2026-11-20):** `trafico_db` y `geotracker_api` apagados y detrás del perfil `compose`; el
+volumen `geotracker_datos_postgres` y el respaldo se conservan. Con eso se cierra P10 (`trafico_inferido`).
 
 ## Riesgos
 

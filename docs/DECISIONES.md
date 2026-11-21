@@ -645,7 +645,32 @@ terminado en el servidor. El script ahora manda el flujo comprimido (`gzip | kub
   coincide. Por la API difieren solo por el tráfico: Compose no tiene tráfico vigente, el cluster sí.
 - Segunda corrida: salta la fusión y la verificación vuelve a pasar. BD del cluster: 2.3 → 3.0 GB.
 **Pendiente:** retirar la BD de Compose (la API de Compose sigue encendida contra ella). Con eso se resuelve P10.
+→ Hecho en D44.
 Diferencia observada, no causada por esta fase: pgRouting 4.0.1 en Compose y 4.0.2 en el cluster.
+
+## D44 — Compose retirado: BD y API apagadas, todo tras perfiles (2026-11-20)
+**Decisión:** `trafico_db` y `geotracker_api` se detienen (`docker compose stop`; contenedores y volumen
+`geotracker_datos_postgres` se conservan) y pasan a perfiles, igual que el ETL (D29) y Grafana (D35):
+`timescaledb` en `compose`, `etl-compose` y `grafana-compose` (todos dependen de ella); `api` en `compose`. Sin
+perfil, `docker compose up -d` no arranca nada. El entorno vigente es solo el cluster.
+**Por qué:**
+- Tras D43 la BD de Compose no tiene nada que el cluster no tenga (salvo `trafico_inferido`, legado) y no recibe datos
+  desde el 2026-11-13; su API respondía rutas sin tráfico vigente, lo que se confunde con la del cluster.
+- `restart: unless-stopped` ya la deja apagada tras reiniciar Docker, pero un `docker compose up -d` (comando que
+  antes estaba en `CLAUDE.md`) la volvía a levantar; el perfil lo impide.
+- La API de Compose y el `port-forward` de la del cluster usan el mismo `localhost:8000`.
+**Se conserva:** el volumen (vuelta atrás: `docker compose --profile compose up -d`) y el respaldo de D43. Borrar el
+volumen queda para cuando el cluster tenga respaldos automáticos (fase 5); hoy es la segunda copia del histórico
+anterior al corte.
+**Consecuencias:**
+- P10 resuelto: `trafico_inferido` solo vive en ese volumen.
+- Tests de integración (`tests/test_asociador_db.py`): levantar solo la BD con
+  `docker compose --profile compose up -d --wait timescaledb`; no se apuntan a la BD del cluster porque crean y borran
+  bases de datos.
+**Verificado (2026-11-20):** ambos contenedores salieron con código 0; `docker compose config --services` sin perfil
+no lista nada, `compose` → `timescaledb api`, `etl-compose` → `timescaledb etl_worker`, `grafana-compose` →
+`timescaledb grafana`; `docker compose up -d --dry-run` sin perfil → "no service selected". El cluster siguió en
+`Running`.
 
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con

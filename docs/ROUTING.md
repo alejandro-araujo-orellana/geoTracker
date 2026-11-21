@@ -43,7 +43,65 @@ TomTom tiles ─▶ fact_flujo_aristas ─┬─▶ predictor v3 ─▶ trafico_
                                     ruta: aristas + geometría + ETA + distancia
 ```
 
+### Petición de una ruta (UML: secuencia)
+
+`GET /api/v1/rutas` de punta a punta (`services/api/app/rutas/`, migraciones 011–012).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Cliente
+    participant I as Ingress (Traefik)
+    participant R as router.py
+    participant S as servicio.calcular_ruta
+    participant PB as PgBouncer
+    participant BD as Base de datos
+
+    C->>I: GET /api/v1/rutas?origen=lat,lon&destino=lat,lon<br/>X-API-Key
+    I->>R: reenvía
+    R->>R: verificar_token() — 401 si falta o no es válido
+    R->>R: Coordenada.desde_texto() — 422 si el formato es inválido
+    R->>S: calcular_ruta(origen, destino)
+    S->>PB: _encajar(origen) / _encajar(destino)
+    PB->>BD: vértice más cercano (dim_calles_osm_vertices_pgr, KNN)
+    BD-->>S: nodo + distancia
+    alt distancia > 300 m, o mismo nodo
+        S-->>C: 422
+    end
+    S->>BD: ruta_mas_rapida() JOIN v_tiempo_libre
+    BD->>BD: pgr_dijkstra(v_costos_grafo, A, B, directed)
+    BD-->>S: aristas en orden (segundos, geom)
+    alt sin aristas
+        S-->>C: 404 (p. ej. solo se llega a contrasentido)
+    end
+    S->>BD: último ciclo de trafico_calles (< 30 min)
+    S->>S: suma duración y flujo libre, calles en orden, une geometría
+    S-->>C: 200 Ruta (distancia, duracion_s, demora, trafico.vigente, geometria)
+```
+
 ## Función de costo
+
+### Costo de una arista (UML: actividad)
+
+Lo que hace `v_costos_grafo` (012) con cada arista de `dim_calles_osm` en cada petición.
+
+```mermaid
+flowchart TD
+    A([Arista de dim_calles_osm]) --> B{"¿activo, source ≠ target<br/>y longitud_m > 0?"}
+    B -- no --> X([Fuera del grafo])
+    B -- sí --> C{"¿cerrada en la última pasada<br/>de tiles (< 30 min)?"}
+    C -- sí --> X
+    C -- no --> D{"¿maxspeed_kmh entre 10 y 130?"}
+    D -- sí --> V1[velocidad = maxspeed_kmh]
+    D -- no --> E{"¿hay velocidad para su tipo_via?"}
+    E -- sí --> V2[velocidad = dim_velocidad_tipo_via]
+    E -- no --> V3[velocidad = 20 km/h]
+    V1 & V2 & V3 --> L["segundos_libre = longitud_m / (velocidad / 3.6)<br/>(v_tiempo_libre)"]
+    L --> F{"¿tiene fila en el último ciclo<br/>de trafico_calles (< 30 min)?"}
+    F -- sí --> G["cost = segundos_libre × nivel_congestion_inf"]
+    F -- no --> H["cost = segundos_libre × 1.0"]
+    G & H --> R(["reverse_cost = -1 (grafo dirigido)<br/>→ pgr_dijkstra"])
+```
 
 `nivel_congestion` = `currentTravelTime / freeFlowTravelTime`, así que multiplica directamente el
 tiempo en flujo libre:
