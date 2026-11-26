@@ -6,3 +6,6 @@ SQLAlchemy==2.0.30
 psycopg2-binary==2.9.10
 pytest==8.2.0
 httpx==0.28.1
+prometheus-client==0.21.1
+# 7.x: la 8.x exige starlette>=1.0, incompatible con fastapi 0.115 (D32).
+prometheus-fastapi-instrumentator==7.1.0

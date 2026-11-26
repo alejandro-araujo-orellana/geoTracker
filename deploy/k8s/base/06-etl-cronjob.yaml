@@ -1,0 +1,91 @@
+# ============================================================================
+# 06-etl-cronjob.yaml — ETL as a scheduled task
+# ============================================================================
+# Currently, ETL runs as a "while True: cycle(); sleep(15min)" loop inside a 
+# container that never terminates. In Kubernetes, this is an anti-pattern: an 
+# infinite process that, if it hangs, goes completely unnoticed. The correct 
+# pattern (as per KUBERNETES.md) is a CronJob: Kubernetes itself triggers it 
+# every 15 minutes, it runs ONE cycle, and then terminates.
+#
+# This requires the code change #1 described in your KUBERNETES.md: a "--once" 
+# mode in main.py that executes `cycle_etl()` and then exits (exit 0 for success, 
+# non-zero for failure). The daemon mode is retained for use with Compose.
+#
+# Why use a CronJob instead of a Deployment with a sleep command?
+# - Kubernetes manages the schedule, not your code.
+# - If a cycle fails (exit != 0), it appears as a failed Job, complete with logs.
+# - `concurrencyPolicy: Forbid` GUARANTEES that no two cycles ever run 
+#   simultaneously. This PROTECTS THE TOMTOM API QUOTA: two concurrent cycles 
+#   would consume double the number of requests—a risk identified as critical 
+#   in your own D7/KUBERNETES.md documentation.
+# ============================================================================
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: geotracker-etl
+  namespace: geotracker
+spec:
+  # Every 15 minutes. The timeZone setting ensures that "every 15 minutes" 
+  # respects local time—useful if it's decided to adjust scheduling 
+  # based on peak or off-peak hours.
+  schedule: "*/15 * * * *"
+  timeZone: "America/Mexico_City"
+ 
+  # Forbid: If a previous cycle is still running when the next one is scheduled, 
+  # the new one will not start. This prevents multiple ETL processes from 
+  # running simultaneously, avoiding redundant quota usage.
+  concurrencyPolicy: Forbid
+ 
+  # Number of past jobs to retain in the history (useful for reviewing failure logs).
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+ 
+  # If a cycle fails to start on time (e.g., due to a busy cluster), this defines 
+  # the maximum delay (in seconds) allowed before the job is considered invalid 
+  # and skipped.
+  startingDeadlineSeconds: 120
+
+  jobTemplate:
+    spec:
+      # If the run fails, retry up to 2 times before marking the Job as
+      # failed. The ETL is idempotent (D4), so retrying is safe.
+      backoffLimit: 2
+      # Terminate the run if it exceeds 10 minutes (the actual run takes ~12s, 
+      # but this protects against a hang). Must be < 15 minutes to avoid 
+      # overlapping with the next scheduled run.
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          # restartPolicy for Jobs: Never or OnFailure. With 'Never', each 
+          # attempt creates a new pod (making logs easier to read).
+          restartPolicy: Never
+          containers:
+            - name: etl
+              # ETL image (KUBERNETES.md: ~2.27 GB, geopandas/GDAL).
+              image: geotracker-etl:latest
+              imagePullPolicy: IfNotPresent
+              # The command that executes ONE run and then terminates (code change #1).
+              command: ["python", "src/main.py", "--una-vez"]
+              envFrom:
+                - configMapRef:
+                    name: geotracker-config
+              env:
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: geotracker-secret
+                      key: DB_PASSWORD
+                - name: TOMTOM_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: geotracker-secret
+                      key: TOMTOM_API_KEY
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  # The predictor with 67k streets makes peaks; so is better lo leave some margin.
+                  memory: "768Mi"
+                  cpu: "1000m"

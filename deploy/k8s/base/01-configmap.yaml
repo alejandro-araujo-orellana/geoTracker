@@ -1,0 +1,34 @@
+##
+#  01-configmap.yaml
+##
+#
+#  ConfigMap stores not sensible details: hosts, database names, the zone bbox, routing
+#  parameters.
+#  This file could be read directly from any access to the namespace and for versioning
+#  with git.
+#  
+#  Each service has a local DNS with the format <service>.<namespace>.svc.cluster.local or 
+#  service if you were on the same namespace. Here we aim to "pgbouncer" because all the
+#  traffic to the DB passes through the pooler, not directly to Postgres.
+#
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: geotracker-config
+  namespace: geotracker
+data:
+  # db conection via pgbouncer, not directly
+  # format: postgresql://<user>@<host>:<port>/<db>
+  DB_HOST: "pgbouncer"
+  DB_PORT: "6432"
+  DB_NAME: "vialidades_slp"
+  DB_USER: "user"
+
+  # app parameters — the name must match the pydantic field in
+  # services/api/app/core/config.py (distancia_max_encaje_m); otherwise it is ignored.
+  DISTANCIA_MAX_ENCAJE_M: "300"
+
+  # app config
+  API_V1_PREFIX: "/api/v1"
+  LOG_LEVEL: "INFO"

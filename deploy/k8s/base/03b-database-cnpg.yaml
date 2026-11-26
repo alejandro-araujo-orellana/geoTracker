@@ -1,0 +1,97 @@
+# ============================================================================
+# 03b-database-cnpg.yaml — Database using the CloudNativePG operator (OPTION B)
+# ============================================================================
+#
+# THIS is the actual objective: a database with replicas + automatic failover.
+# DO NOT apply this locally yet; must first complete two steps:
+#   1. Install the CloudNativePG operator in the cluster.
+#   2. Verify that your specified image runs correctly under its management (addressing
+#      the risk we noted: TimescaleDB 2.10.2 + pgRouting 4.0.1 must be compatible).
+#
+# What is an operator, in a nutshell? It is a program that resides within the cluster
+# and "knows" how to manage a specific resource. CloudNativePG is designed for
+# PostgreSQL: it creates the primary instance, spins up N replicas, keeps them
+# synchronized via streaming, and—if the primary fails—automatically promotes a
+# replica to become the new primary (failover). Instead of manually writing a
+# StatefulSet, you declare a high-level "Cluster" object, and the operator
+# automatically generates all the underlying components.
+#
+# Why does this the objectives, whereas a simple StatefulSet does not?
+# - True redundancy: If the primary fails, a replica takes its place within
+#   seconds, with no manual intervention required. There is no single point of failure.
+# - Infrastructure-level read/write separation: The operator automatically creates
+#   TWO Services—one that ALWAYS points to the primary (for writes) and another
+#   that distributes traffic among the replicas (for reads). This is exactly what
+#   the `database.py` expects. Service names at the end.
+#
+# This "Cluster" object is a CRD (Custom Resource Definition)—a resource type
+# that the operator adds to Kubernetes. Consequently, `kind: Cluster` is only
+# available if CloudNativePG is installed. 
+# ============================================================================
+
+
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: geotracker-db
+  namespace: geotracker
+spec:
+  # 3 instances: 1 primary + 2 read replicas. If the primary fails, one
+  # of the 2 replicas is promoted. For this system purposes, 3 is the sensible minimum.
+  instances: 3
+
+  # The pinned image. CloudNativePG requires the image to adhere to its
+  # contract (initdb, users, etc.). The TimescaleDB image may require adjustments
+  # to be 100% compatible—this is EXACTLY what must be validated before
+  # relying on this file. If it is not compatible out of the box, the path forward
+  # is to build an image based on the CloudNativePG images plus the
+  # extensions, or to evaluate option C (a database managed outside the cluster).
+  imageName: geotracker-timescaledb:pg15.2-ts2.10.2
+
+  # PostgreSQL parameters. shared_preload_libraries is CRITICAL: TimescaleDB
+  # and pgRouting must be loaded at startup. Without this, the extensions will
+  # not work, even if they are installed.
+  postgresql:
+    shared_preload_libraries:
+      - "timescaledb"
+    parameters:
+      max_connections: "100"
+      # Adjust based on measured baseline.
+
+  # Storage: each instance requests its own 10Gi disk.
+  storage:
+    size: 10Gi
+ 
+  # Bootstrap: how the cluster is initialized. "initdb" creates a new, empty database. To
+  # MIGRATE the existing data from Compose, use "recovery" from a backup
+  # (pg_dump/pg_restore, as described in KUBERNETES.md § Data Migration)—do not use this.
+  bootstrap:
+    initdb:
+      database: vialidades_slp
+      owner: user
+      secret:
+        name: geotracker-secret   # uses DB_PASSWORD from the Secret
+ 
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+# ── Services created AUTOMATICALLY by the operator (not defined manually) ──
+# When the Cluster exists, CloudNativePG generates the following Services:
+#
+#   geotracker-db-rw   → ALWAYS points to the primary (read-write)
+#   geotracker-db-ro   → distributes traffic among replicas (read-only)
+#   geotracker-db-r    → points to any instance (read-enabled; includes the primary)
+#
+# Consequently, the configuration should be:
+#   DATABASE_WRITE_URL → points to geotracker-db-rw
+#   DATABASE_READ_URL  → points to geotracker-db-ro
+#
+# If the primary goes down, the operator automatically updates geotracker-db-rw 
+# to point to the new primary. The application remains unaware of this change 
+# and continues using the same name.
+# (In this model, you can place PgBouncer in front of these Services, or use 
+#  the built-in connection pooler provided by CloudNativePG via its "Pooler" resource.)

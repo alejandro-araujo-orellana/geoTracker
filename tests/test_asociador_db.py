@@ -6,7 +6,7 @@ Se salta si no hay BD alcanzable (variables DB_* del entorno).
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -16,7 +16,9 @@ URL_BASE = "postgresql+psycopg2://{u}:{p}@{h}:{port}/{db}".format(
     u=os.environ.get("DB_USER", ""), p=os.environ.get("DB_PASSWORD", ""),
     h=os.environ.get("DB_HOST", "localhost"), port=os.environ.get("DB_PORT", "5432"), db="{db}",
 )
-TS = datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc)
+# Reciente, no fija: la política de compresión (008) comprime chunks de más de 7 días y, en la
+# BD temporal, compite con los INSERT del test (deadlock). Hora en punto: el test usa :15/:30/:45.
+TS = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
 
 
 @pytest.fixture(scope="module")

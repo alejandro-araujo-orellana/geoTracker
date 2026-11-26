@@ -1,0 +1,68 @@
+# ============================================================================
+# Grafana alert rules — database disk (D31, D41, D42)
+# ============================================================================
+# kubelet_volume_stats does not work for this in k3d: local-path volumes are
+# host directories, so used/capacity is the whole host disk (~1 TB), not the
+# PVC. Instead: DB size (SQL) over the PVC's requested size (kube-state-metrics),
+# which is the provisioned disk on Azure Disk and our capacity plan in local.
+# WAL also lives in PGDATA and is not counted (bounded by max_wal_size): 80 %
+# leaves room for it.
+# ============================================================================
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: geotracker-bd
+    folder: geoTracker
+    interval: 10m
+    rules:
+      - uid: bd-disco-80
+        title: BD por encima del 80 % de su disco
+        condition: D
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: timescaledb
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: SELECT CAST(pg_database_size(current_database()) AS double precision) AS bytes_bd
+          - refId: B
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: B
+              expr: max(kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="geotracker", persistentvolumeclaim="datos-postgres-geotracker-db-0"})
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: $A / $B * 100
+          - refId: D
+            datasourceUid: __expr__
+            model:
+              refId: D
+              type: threshold
+              expression: C
+              conditions:
+                - evaluator: { type: gt, params: [80] }
+        # OK, not NoData (D42): on a machine that suspends, the 10-min evaluations
+        # that land in the scrape gap find no series and pushed a false
+        # "DatasourceNoData" on wake-up. The disk grows slowly; a missing DB is
+        # already covered by "API no disponible" and "ETL sin correr".
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+          servicio: bd
+        annotations:
+          summary: "La BD ocupa el {{ printf \"%.0f\" $values.C.Value }} % del PVC"
+          description: >-
+            pg_database_size frente al tamaño solicitado del PVC datos-postgres-geotracker-db-0. Opciones:
+            ampliar el PVC (Azure Disk lo permite en caliente), revisar retención/compresión (migración
+            008) o tablas legadas (trafico_inferido, P10).

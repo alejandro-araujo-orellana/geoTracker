@@ -74,10 +74,29 @@ def aplicar_migraciones(engine, directorio: Path = DIRECTORIO_MIGRACIONES) -> li
     return nuevas
 
 
+def configurar_rol_grafana(engine, password: str) -> None:
+    """
+    Habilita el login de `grafana_ro` (creado por la migración 013) con esta contraseña.
+    Idempotente: correrlo con otra contraseña la rota. D33.
+    """
+    if not password:
+        raise ValueError("Contraseña vacía para grafana_ro")
+    with engine.begin() as conn:
+        # ALTER ROLE no admite parámetros del lado del servidor; psycopg2 sustituye %s del
+        # lado del cliente con el escapado correcto.
+        conn.exec_driver_sql("ALTER ROLE grafana_ro WITH LOGIN PASSWORD %s", (password,))
+
+
 if __name__ == "__main__":
     from sqlalchemy import create_engine
 
     import config
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    aplicar_migraciones(create_engine(config.DB_URL))
+    engine = create_engine(config.DB_URL)
+    aplicar_migraciones(engine)
+    if config.GRAFANA_DB_PASSWORD:
+        configurar_rol_grafana(engine, config.GRAFANA_DB_PASSWORD)
+        logger.info("Rol grafana_ro: login habilitado con la contraseña de GRAFANA_DB_PASSWORD.")
+    else:
+        logger.info("Sin GRAFANA_DB_PASSWORD: el rol grafana_ro queda sin login.")

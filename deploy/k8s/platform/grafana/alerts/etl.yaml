@@ -1,0 +1,102 @@
+# ============================================================================
+# Grafana alert rules — ETL (D31, D40)
+# ============================================================================
+# Provisioned from git: the Grafana sidecar loads ConfigMaps labelled
+# grafana_alert=1 (platform/kustomization.yaml) and calls the alerting reload
+# API. Provisioned rules are read-only in the UI: change them here.
+#
+# ONE set of rules for every environment (D31): in local, Grafana Alerting
+# notifies by itself; in the cloud it forwards to the chart's Alertmanager.
+#
+# Behaviour on a machine that is switched off every day: while it is off,
+# nothing evaluates. On boot, the last success is hours old, so the rule fires
+# ~2 min after Grafana is up and resolves after the first ETL cycle (next */15).
+# That firing is real: those hours have no traffic data.
+# ============================================================================
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: geotracker-etl
+    folder: geoTracker
+    interval: 1m
+    rules:
+      - uid: etl-sin-correr
+        title: ETL sin correr
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # Minutes since the CronJob's last successful Job (kube-state-metrics).
+              expr: (time() - max(kube_cronjob_status_last_successful_time{namespace="geotracker", cronjob="geotracker-etl"})) / 60
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                # 45 min = 3 missed cycles of */15 (KUBERNETES.md, "Alertas iniciales").
+                - evaluator: { type: gt, params: [45] }
+        # No series = kube-state-metrics down or the CronJob gone: we cannot tell
+        # the ETL is running, so treat it as firing.
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+          servicio: etl
+        annotations:
+          summary: El ETL de geoTracker no ha completado un ciclo en más de 45 min
+          description: >-
+            Último ciclo exitoso del CronJob geotracker-etl hace {{ printf "%.0f" $values.A.Value }} min.
+            Esos ciclos no tienen datos de tráfico. Revisar: kubectl get cronjob,jobs -n geotracker
+            (¿suspend=true?, ¿Job fallido?) y si el equipo estuvo apagado o suspendido.
+          runbook_url: docs/KUBERNETES.md#observabilidad-operación-d33
+
+      # The Job can succeed without measuring anything (tile pass failed and was
+      # absorbed, 403 block, no budget): ejecuciones_etl (D41) tells. Needs >= 3
+      # cycles in the window (HAVING): fewer rows = no data = OK; "ETL sin
+      # correr" already covers "no cycles at all".
+      - uid: etl-sin-tiles
+        title: ETL sin datos de tiles
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: timescaledb
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT count(*) FILTER (WHERE aristas_medidas > 0) AS ciclos_con_tiles
+                FROM ejecuciones_etl
+                WHERE inicio > now() - INTERVAL '50 minutes'
+                HAVING count(*) >= 3
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+          servicio: etl
+        annotations:
+          summary: Los últimos ciclos del ETL corrieron pero no midieron ninguna calle con tiles
+          description: >-
+            Ningún ciclo de los últimos 50 min midió aristas con vector tiles. Ver la columna error de
+            ejecuciones_etl y la alerta "TomTom respondió 403"; logs: kubectl logs -n geotracker job/<último>.

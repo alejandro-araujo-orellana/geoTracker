@@ -3,6 +3,13 @@
 # GF_ADMIN_USER, GF_ADMIN_PASSWORD). Nada sensible en este archivo.
 # Imágenes con versión fija: reconstruir o actualizar la BD/Grafana es una decisión
 # explícita, no un efecto secundario de `docker compose up`.
+#
+# TODO APAGADO por defecto (D44): el sistema vigente es el cluster de Kubernetes (docs/KUBERNETES.md).
+# Sin perfil, `docker compose up -d` no arranca nada. Perfiles:
+#   compose          → BD + API (la BD de Compose quedó congelada en el corte del 2026-11-13, D29/D43)
+#   etl-compose      → BD + ETL      (D29; suspender antes el CronJob del cluster)
+#   grafana-compose  → BD + Grafana  (D35)
+# Solo la BD (p. ej. para tests de integración): `docker compose --profile compose up -d --wait timescaledb`.
 
 name: geotracker
 
@@ -14,6 +21,10 @@ services:
     build:
       context: ./db
     container_name: trafico_db
+    # DESACTIVADA por defecto (D44): la BD vigente es geotracker-db-0 en el cluster. El volumen
+    # datos_postgres se conserva (histórico ya copiado al cluster, D43). En todos los perfiles porque
+    # los demás servicios dependen de ella.
+    profiles: ["compose", "etl-compose", "grafana-compose"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER}
@@ -35,6 +46,12 @@ services:
   etl_worker:
     build: .
     container_name: etl_trafico
+    # DESACTIVADO por defecto (D29): el ETL corre ahora como CronJob en Kubernetes.
+    # Ambos usan la misma clave TomTom con pools consumo_api separados: correr los dos
+    # excede la cuota. Solo arranca con `docker compose --profile etl-compose up -d`
+    # (y entonces suspende el CronJob: `kubectl patch cronjob geotracker-etl -n geotracker
+    # -p '{"spec":{"suspend":true}}'`).
+    profiles: ["etl-compose"]
     restart: unless-stopped
     depends_on:
       timescaledb:
@@ -50,6 +67,10 @@ services:
   api:
     build: ./services/api
     container_name: geotracker_api
+    # DESACTIVADA por defecto (D44): la API vigente es el Deployment geotracker-api del cluster
+    # (`kubectl port-forward -n geotracker svc/geotracker-api 8000:80`). Usa el mismo puerto local.
+    # Solo arranca con `docker compose --profile compose up -d`.
+    profiles: ["compose"]
     restart: unless-stopped
     depends_on:
       timescaledb:
@@ -61,7 +82,7 @@ services:
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -71,6 +92,11 @@ services:
   grafana:
     image: grafana/grafana-oss:13.0.2
     container_name: grafana_bi
+    # DESACTIVADO por defecto (D35): el Grafana vigente es el del cluster (D33,
+    # `kubectl port-forward -n monitoring svc/kps-grafana 3001:80`). Este lee la BD de Compose,
+    # sin datos nuevos desde el corte de D29. Solo arranca con
+    # `docker compose --profile grafana-compose up -d grafana`. El volumen grafana_data se conserva.
+    profiles: ["grafana-compose"]
     restart: unless-stopped
     depends_on:
       timescaledb:

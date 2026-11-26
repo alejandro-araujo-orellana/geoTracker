@@ -14,6 +14,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
+# scripts/: osmnx_loader.py corre como Job en Kubernetes (D29).
+COPY scripts/ ./scripts/
 COPY data/ ./data/
 COPY db/migrations/ ./db/migrations/
 

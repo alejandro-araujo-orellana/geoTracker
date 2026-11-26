@@ -1,0 +1,887 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "adrdrr6"
+  },
+  "spec": {
+    "annotations": [
+      {
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "datasource": {
+              "name": "-- Grafana --"
+            },
+            "spec": {}
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "builtIn": true
+        }
+      }
+    ],
+    "cursorSync": "Off",
+    "editable": true,
+    "elements": {
+      "panel-1": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1,
+          "title": "Congestión por ciclo (calles medidas)",
+          "description": "Por ciclo de 15 min, sobre las calles medidas por tiles (resumen_trafico_ciclo, D38): congestión promedio (1 = flujo libre) y % de calles con congestión >= 1.3 (incluye cerradas). Los huecos son ciclos sin datos (ETL o cluster detenido).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "grafana-postgresql-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "timescaledb"
+                      },
+                      "spec": {
+                        "dataset": "vialidades_slp",
+                        "editorMode": "code",
+                        "format": "time_series",
+                        "rawQuery": true,
+                        "rawSql": "-- Serie por ciclo desde el continuous aggregate resumen_trafico_ciclo (migración 014, D38).\nSELECT\n    ciclo                                                   AS \"time\",\n    congestion_promedio                                     AS \"Congestión promedio\",\n    100.0 * aristas_congestionadas / NULLIF(aristas_medidas, 0) AS \"% calles congestionadas\"\nFROM resumen_trafico_ciclo\nWHERE $__timeFilter(ciclo)\nORDER BY 1;",
+                        "sql": {
+                          "columns": [
+                            {
+                              "parameters": [],
+                              "type": "function"
+                            }
+                          ],
+                          "groupBy": [
+                            {
+                              "property": {
+                                "type": "string"
+                              },
+                              "type": "groupBy"
+                            }
+                          ],
+                          "limit": 50
+                        }
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "legend": {
+                  "showLegend": true,
+                  "displayMode": "list",
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "decimals": 2,
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "orange"
+                  },
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 10,
+                    "gradientMode": "none",
+                    "showPoints": "never",
+                    "spanNulls": false,
+                    "insertNulls": 1800000,
+                    "axisPlacement": "auto",
+                    "axisSoftMin": 1,
+                    "thresholdsStyle": {
+                      "mode": "line+area"
+                    }
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "transparent"
+                      },
+                      {
+                        "value": 1.3,
+                        "color": "yellow"
+                      },
+                      {
+                        "value": 1.7,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 2.5,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "% calles congestionadas"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "percent"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 1
+                      },
+                      {
+                        "id": "min",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.axisPlacement",
+                        "value": "right"
+                      },
+                      {
+                        "id": "custom.axisSoftMin",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.fillOpacity",
+                        "value": 0
+                      },
+                      {
+                        "id": "custom.lineStyle",
+                        "value": {
+                          "fill": "dash",
+                          "dash": [
+                            6,
+                            4
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.thresholdsStyle",
+                        "value": {
+                          "mode": "off"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "red"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-2": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "Tráfico medido por calle (último ciclo)",
+          "description": "Calles medidas por los vector tiles de TomTom en el último ciclo del rango (trafico_calles, metodo_inferencia = TILE). Cada calle se dibuja como puntos cada 30 m, coloreados por congestión: 1 = flujo libre; 10 = cerrada (D37).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "grafana-postgresql-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "timescaledb"
+                      },
+                      "spec": {
+                        "dataset": "vialidades_slp",
+                        "editorMode": "code",
+                        "format": "table",
+                        "rawQuery": true,
+                        "rawSql": "-- Calles MEDIDAS por tiles (metodo_inferencia = 'TILE') en el último ciclo del rango (D37).\n-- Geomap no dibuja una línea por segmento: cada calle se densifica en puntos cada 30 m (UTM 14N),\n-- que a zoom 12-15 se ven como un trazo continuo. ~15 k calles → ~38 k puntos, ~0.3 s.\n-- Orden ascendente: las calles más congestionadas se pintan encima (las de doble sentido son dos aristas).\n-- nivel_congestion_inf: 1 = flujo libre; mayor = más congestión; 10 = cerrada.\nWITH ciclo AS (\n    SELECT max(timestamp_calculo) AS ts\n    FROM trafico_calles\n    WHERE $__timeFilter(timestamp_calculo) AND metodo_inferencia = 'TILE'\n), medidas AS (\n    SELECT t.timestamp_calculo,\n           t.nivel_congestion_inf,\n           o.nombre,\n           o.tipo_via,\n           ST_Transform(o.geom, 32614) AS g\n    FROM trafico_calles t\n    JOIN ciclo c ON t.timestamp_calculo = c.ts\n    JOIN dim_calles_osm o ON o.osm_id = t.osm_id\n    WHERE t.metodo_inferencia = 'TILE'\n)\nSELECT\n    m.timestamp_calculo                       AS \"time\",\n    round(m.nivel_congestion_inf::numeric, 2) AS congestion,\n    coalesce(m.nombre, '(sin nombre)')        AS calle,\n    m.tipo_via,\n    ST_Y(d.p)                                 AS latitude,\n    ST_X(d.p)                                 AS longitude\nFROM medidas m\nCROSS JOIN LATERAL (\n    SELECT (ST_DumpPoints(ST_Transform(\n               ST_LineInterpolatePoints(m.g, least(1.0, 30.0 / greatest(ST_Length(m.g), 30.0))),\n               4326))).geom AS p\n) d\nORDER BY congestion ASC;",
+                        "sql": {
+                          "columns": [
+                            {
+                              "parameters": [],
+                              "type": "function"
+                            }
+                          ],
+                          "groupBy": [
+                            {
+                              "property": {
+                                "type": "string"
+                              },
+                              "type": "groupBy"
+                            }
+                          ],
+                          "limit": 50
+                        }
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "geomap",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "basemap": {
+                  "config": {},
+                  "name": "Layer 0",
+                  "noRepeat": false,
+                  "type": "osm-standard"
+                },
+                "controls": {
+                  "mouseWheelZoom": true,
+                  "showAttribution": true,
+                  "showDebug": false,
+                  "showMeasure": false,
+                  "showScale": false,
+                  "showZoom": true
+                },
+                "layers": [
+                  {
+                    "config": {
+                      "showLegend": true,
+                      "style": {
+                        "color": {
+                          "field": "congestion",
+                          "fixed": "green"
+                        },
+                        "opacity": 0.9,
+                        "rotation": {
+                          "fixed": 0,
+                          "max": 360,
+                          "min": -360,
+                          "mode": "mod"
+                        },
+                        "size": {
+                          "fixed": 3,
+                          "max": 15,
+                          "min": 2
+                        },
+                        "symbol": {
+                          "fixed": "img/icons/marker/circle.svg",
+                          "mode": "fixed"
+                        },
+                        "symbolAlign": {
+                          "horizontal": "center",
+                          "vertical": "center"
+                        },
+                        "textConfig": {
+                          "fontSize": 12,
+                          "offsetX": 0,
+                          "offsetY": 0,
+                          "textAlign": "center",
+                          "textBaseline": "middle"
+                        }
+                      }
+                    },
+                    "location": {
+                      "latitude": "latitude",
+                      "longitude": "longitude",
+                      "mode": "coords"
+                    },
+                    "name": "Congestión",
+                    "tooltip": true,
+                    "type": "markers"
+                  }
+                ],
+                "tooltip": {
+                  "mode": "details"
+                },
+                "view": {
+                  "allLayers": true,
+                  "dashboardVariable": false,
+                  "id": "coords",
+                  "lat": 22.15,
+                  "lon": -100.98,
+                  "noRepeat": false,
+                  "zoom": 12
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1.3,
+                        "color": "yellow"
+                      },
+                      {
+                        "value": 1.7,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 2.5,
+                        "color": "red"
+                      },
+                      {
+                        "value": 9.99,
+                        "color": "purple"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "custom": {
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3,
+          "title": "Congestión inferida (último ciclo)",
+          "description": "Congestión del último ciclo en todas las calles (medidas + inferidas por IDW), agregada en celdas de ~200 m. El calor es el exceso sobre flujo libre (congestión − 1, tope 1.5): las zonas libres no pintan (D40).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "grafana-postgresql-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "timescaledb"
+                      },
+                      "spec": {
+                        "dataset": "vialidades_slp",
+                        "editorMode": "code",
+                        "format": "table",
+                        "rawQuery": true,
+                        "rawSql": "-- Congestión inferida del ÚLTIMO ciclo del predictor dentro del rango (trafico_calles, D13).\n-- Reemplaza la consulta a trafico_inferido (IDW_GRID, legado P10: ya no se escribe ni existe en el cluster).\n-- Un ciclo son ~67 k calles; se agregan en celdas de 0.002° (~200 m) → ~3.3 k puntos para el navegador (D33).\n-- nivel_congestion_inf: 1 = flujo libre; mayor = más congestión.\nWITH puntos AS (\n    SELECT t.timestamp_calculo,\n           t.nivel_congestion_inf,\n           ST_LineInterpolatePoint(o.geom, 0.5) AS p\n    FROM trafico_calles t\n    JOIN dim_calles_osm o ON o.osm_id = t.osm_id\n    WHERE t.timestamp_calculo = (\n        SELECT max(timestamp_calculo) FROM trafico_calles WHERE $__timeFilter(timestamp_calculo)\n    )\n)\nSELECT\n    max(timestamp_calculo)     AS \"time\",\n    avg(nivel_congestion_inf)  AS \"congestion_inferida\",\n    -- Peso del heatmap (D40): exceso sobre flujo libre, con tope para que las cerradas (10) no saturen la escala.\n    least(greatest(avg(nivel_congestion_inf) - 1, 0), 1.5) AS peso,\n    avg(ST_Y(p))               AS latitude,\n    avg(ST_X(p))               AS longitude\nFROM puntos\nGROUP BY round(ST_Y(p)::numeric / 0.002), round(ST_X(p)::numeric / 0.002);",
+                        "sql": {
+                          "columns": [
+                            {
+                              "parameters": [],
+                              "type": "function"
+                            }
+                          ],
+                          "groupBy": [
+                            {
+                              "property": {
+                                "type": "string"
+                              },
+                              "type": "groupBy"
+                            }
+                          ],
+                          "limit": 50
+                        }
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "geomap",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "basemap": {
+                  "config": {},
+                  "name": "Layer 0",
+                  "noRepeat": false,
+                  "type": "osm-standard"
+                },
+                "controls": {
+                  "mouseWheelZoom": true,
+                  "showAttribution": true,
+                  "showDebug": false,
+                  "showMeasure": false,
+                  "showScale": false,
+                  "showZoom": true
+                },
+                "layers": [
+                  {
+                    "config": {
+                      "blur": 18,
+                      "radius": 8,
+                      "weight": {
+                        "field": "peso",
+                        "fixed": 1,
+                        "max": 1,
+                        "min": 0
+                      }
+                    },
+                    "location": {
+                      "latitude": "latitude",
+                      "longitude": "longitude",
+                      "mode": "coords"
+                    },
+                    "name": "Exceso de congestión",
+                    "tooltip": true,
+                    "type": "heatmap"
+                  }
+                ],
+                "tooltip": {
+                  "mode": "details"
+                },
+                "view": {
+                  "allLayers": true,
+                  "dashboardVariable": false,
+                  "id": "coords",
+                  "lat": 22.15,
+                  "lon": -100.98,
+                  "noRepeat": false,
+                  "zoom": 12
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 80,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "shades",
+                    "fixedColor": "green"
+                  },
+                  "custom": {
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "peso"
+                    },
+                    "properties": [
+                      {
+                        "id": "min",
+                        "value": 0
+                      },
+                      {
+                        "id": "max",
+                        "value": 1.5
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "ETL: minutos desde el último ciclo exitoso",
+          "description": "kube_cronjob_status_last_successful_time del CronJob geotracker-etl (kube-state-metrics). Corre cada 15 min; > 45 min dispara la alerta \"ETL sin correr\" (D40).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "prometheus"
+                      },
+                      "spec": {
+                        "expr": "(time() - max(kube_cronjob_status_last_successful_time{namespace=\"geotracker\", cronjob=\"geotracker-etl\"})) / 60",
+                        "instant": true,
+                        "range": false,
+                        "legendFormat": "minutos"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "textMode": "value",
+                "orientation": "auto",
+                "wideLayout": true,
+                "showPercentChange": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "m",
+                  "decimals": 0,
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "noValue": "sin dato",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 20,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 45,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "id": 5,
+          "title": "ETL: últimos ciclos",
+          "description": "Una fila por ciclo (ejecuciones_etl, D41). ok = midió y corrió el predictor; sin_datos = ninguna fuente trajo datos; error = el ciclo falló (Job fallido).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "grafana-postgresql-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "timescaledb"
+                      },
+                      "spec": {
+                        "dataset": "vialidades_slp",
+                        "editorMode": "code",
+                        "format": "table",
+                        "rawQuery": true,
+                        "rawSql": "-- Últimos ciclos del ETL (ejecuciones_etl, migración 015, D41).\nSELECT inicio            AS \"Inicio\",\n       estado            AS \"Estado\",\n       aristas_medidas   AS \"Aristas (tiles)\",\n       sd_peticiones     AS \"Segment Data\",\n       round(duracion_s::numeric, 1) AS \"Duración (s)\",\n       coalesce(error, '') AS \"Error\"\nFROM ejecuciones_etl\nORDER BY inicio DESC\nLIMIT 12;"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.0.2",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "fields": ""
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Estado"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "ok": {
+                                "color": "green",
+                                "index": 0
+                              },
+                              "sin_datos": {
+                                "color": "orange",
+                                "index": 1
+                              },
+                              "error": {
+                                "color": "red",
+                                "index": 2
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Inicio"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "dateTimeAsLocal"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 170
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Error"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "auto",
+                          "wrapText": false
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-1"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-2"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 8,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 8,
+              "width": 6,
+              "height": 5,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 16,
+              "width": 24,
+              "height": 9,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-5"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "links": [],
+    "liveNow": false,
+    "preload": false,
+    "tags": [],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-6h",
+      "to": "now",
+      "autoRefresh": "",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
+      ],
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0
+    },
+    "title": "HeatMap SLP Traffic",
+    "variables": [],
+    "preferences": {
+      "layout": {
+        "kind": "GridLayout",
+        "spec": {
+          "items": []
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,80 @@
+# ============================================================================
+# overlays/local/kustomization.yaml — Settings for the LOCAL cluster
+# ============================================================================
+# An overlay starts with the base configuration and applies PATCHES: it only
+# modifies what differs in this specific environment. For a local setup, the
+# goal is to consume fewer resources (your machine has ~7.6 GiB available for
+# Docker—see KUBERNETES.md) and to simplify the configuration.
+#
+# How to use: kubectl apply -k deploy/k8s/overlays/local
+# The -k flag tells kubectl that this is a Kustomize directory.
+#
+# Changes relative to the base configuration:
+#  - The API replica count is reduced from 3 to 1 (you don't need true
+#    redundancy locally, and with only 1–2 nodes, distributing 3 replicas
+#    isn't feasible anyway).
+#  - This renders the base configuration's pod spread and PDB (Pod Disruption
+#    Budget) effectively inactive locally; however, we do NOT remove them.
+#    Keeping them allows you to practice with these features in place, and
+#    they become relevant again in the cloud overlay, where there are more
+#    replicas and nodes.
+# ============================================================================
+ 
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+ 
+# No global `namespace:` here: this overlay now spans two namespaces (geotracker
+# and monitoring, D33) and a global one would force everything into one. Each
+# generator below declares its own; base and platform declare theirs.
+
+resources:
+  - ../../base
+  # geoTracker's observability pieces: API ServiceMonitor + dashboards (D31, D33).
+  # Needs kube-prometheus-stack installed FIRST (CRDs + monitoring namespace).
+  - ../../platform
+
+# Secrets from untracked files (D27); copy them from the *.example templates.
+# disableNameSuffixHash: keep the fixed names the manifests reference. Downside:
+# changing a value does not restart pods by itself:
+#   kubectl rollout restart deployment/geotracker-api -n geotracker
+secretGenerator:
+  # secret.env — DB_PASSWORD, TOMTOM_API_KEY, API_TOKENS.
+  - name: geotracker-secret
+    namespace: geotracker
+    envs:
+      - secret.env
+  # grafana.env — GF_SECURITY_ADMIN_USER, GF_SECURITY_ADMIN_PASSWORD, GRAFANA_DB_PASSWORD, NTFY_URL.
+  # The same file feeds both namespaces, so the read-only DB password set by the
+  # migrations Job (geotracker) and the one Grafana uses (monitoring) cannot drift. D33.
+  - name: grafana-secret
+    namespace: geotracker
+    envs:
+      - grafana.env
+  - name: grafana-secret
+    namespace: monitoring
+    envs:
+      - grafana.env
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Patch: Set the API to 1 replica locally (instead of the 3 defined in the base).
+patches:
+  - target:
+      kind: Deployment
+      name: geotracker-api
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  # The ETL CronJob is ACTIVE: the Compose ETL is disabled behind a profile (D29).
+  # Never run both: same TomTom key, separate consumo_api pools -> over quota.
+  # To go back to Compose, suspend it first:
+  #   kubectl patch cronjob geotracker-etl -n geotracker -p '{"spec":{"suspend":true}}'
+  # Set PgBouncer to 1 replica locally as well (to save memory).
+  - target:
+      kind: Deployment
+      name: pgbouncer
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1

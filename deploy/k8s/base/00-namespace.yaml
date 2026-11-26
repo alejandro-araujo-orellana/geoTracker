@@ -1,0 +1,16 @@
+##
+#  00-namespace.yaml
+##
+#
+#  namespace - logic partition inside the cluster. Here is where the geoTracker system
+#  lives in, separated of other apps, living inside kube-system.
+#
+#  it asolates resources, allowing network policies in all the project once.
+#
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: geotracker
+  labels:
+    app.kubernetes.io/part-of: geotracker

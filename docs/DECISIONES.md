@@ -155,6 +155,523 @@ misma ruta, demora por tráfico, vigencia del tráfico, calles en orden y geomet
 (`geotracker_datos_postgres`, `geotracker_grafana_data`); extensiones idénticas; ningún conteo disminuyó (el ETL nuevo
 sumó su primer ciclo). Reemplaza la restricción de D15: ya se puede usar `docker compose up -d` normal.
 
+## D18 — Herramientas para el milestone de Kubernetes (preliminar, 2026-11-09)
+**Decisión:** se usarán **Terraform** (infraestructura: cluster, red, registro, respaldos y BD si queda fuera del cluster)
+y **Ansible** (configuración de hosts/VMs y procedimientos operativos como la actualización de TimescaleDB).
+**Prometheus** (+ Alertmanager) es la opción de observabilidad a evaluar. **Puppet queda descartado.** CI/CD (Jenkins o
+GitHub Actions) sigue abierto.
+**Por qué:** cada herramienta cubre una capa distinta y no chocan mientras cada una administre un solo dominio
+(Terraform no despliega las apps; Ansible no despliega contenedores; un solo camino de despliegue). Puppet se traslapa
+con el modelo de contenedores, exige servidor y agentes, y entraría en conflicto con Kubernetes sobre los nodos;
+Ansible cubre la preparación de hosts sin agentes.
+**Dónde:** análisis completo en `docs/KUBERNETES.md` › Herramientas complementarias. Se confirma o ajusta en la
+sesión del milestone.
+
+## D19 — Nube: Azure (AKS), después del entorno local (2026-11-12)
+**Decisión:** el orden es local primero (fase 1) y nube después (fase 2). El proveedor de nube es **Azure (AKS)**,
+con el crédito gratuito de $100 USD como presupuesto. Registro de imágenes: Azure Container Registry o GHCR.
+**Por qué:** aprender Kubernetes en local no consume crédito; el crédito de Azure cubre la fase 2 si el cluster se
+apaga cuando no se usa. La BD gestionada (opción C) se descartó porque ningún servicio ofrece la combinación fijada
+PostgreSQL 15.2 + TimescaleDB 2.10.2 + PostGIS + pgRouting (D17): en la nube la BD irá con CloudNativePG (opción B).
+**Pendiente:** medir el consumo contra el crédito en la fase 2; `overlays/nube` y `deploy/terraform/` aún no existen.
+**Dónde:** `docs/KUBERNETES.md` › Fase 2; manifiestos base en el commit `8461992`.
+
+## D20 — Kustomize (base + overlays), no Helm (2026-11-12)
+**Decisión:** los manifiestos se administran con **Kustomize**: `deploy/k8s/base` (lo común) + `overlays/local` y,
+en la fase 2, `overlays/nube`, que solo parchan lo que difiere (réplicas, almacenamiento, Ingress, secretos).
+**Por qué:** viene integrado en `kubectl` (`apply -k`), son YAML planos sin lenguaje de plantillas, y para un solo
+proyecto con dos entornos no hace falta el empaquetado/versionado de charts de Helm. Helm queda para componentes de
+terceros (p. ej. `kube-prometheus-stack`, fase 3).
+**Consecuencia:** `03b-database-cnpg.yaml` vive en `base/` pero fuera del `kustomization.yaml` hasta instalar el
+operador; el cambio A → B es intercambiar ese archivo en la lista.
+**Dónde:** commit `8461992` (`deploy/k8s/base/kustomization.yaml`, `deploy/k8s/overlays/local/kustomization.yaml`).
+
+## D21 — Cluster local con k3d (2026-11-12)
+**Decisión:** el cluster de desarrollo es **k3d** (k3s dentro de contenedores Docker): 1 server + 2 agentes, cluster
+`geotracker`. Las imágenes se cargan con `k3d image import` (sin registro) e `imagePullPolicy: IfNotPresent`.
+**Por qué:** corre sobre el Docker que ya usa Compose, sin VMs; se recrea con un comando; trae Traefik (Ingress) y el
+provisionador `local-path` (PVC) de fábrica. Varios nodos permiten practicar el reparto de réplicas (D22).
+Terraform/Ansible se reservan para la nube.
+**Ojo:** Compose nombra la imagen del ETL `geotracker-etl_worker`; los manifiestos usan `geotracker-etl`, hay que
+re-etiquetarla antes de importarla (tabla en `docs/KUBERNETES.md` › Imágenes).
+**Dónde:** commit `8461992`.
+
+## D22 — PgBouncer propio, PodDisruptionBudget y reparto entre nodos (2026-11-12)
+**Decisión:** tres añadidos al diseño original, para los dos objetivos del milestone (redundancia y multiusuario):
+- **PgBouncer** como `Deployment` propio (2 réplicas en base, 1 en local), modo `transaction`, 20 conexiones reales a
+  Postgres. Todo el tráfico a la BD pasa por el `Service` `pgbouncer:6432` (`DB_HOST` en el ConfigMap).
+- **PodDisruptionBudget** de la API con `minAvailable: 1`: un drenaje de nodo nunca deja la API en cero.
+- **topologySpreadConstraints** por `kubernetes.io/hostname` (`ScheduleAnyway`): las réplicas de la API en nodos
+  distintos; en la nube podrá endurecerse a `DoNotSchedule`.
+**Por qué:** cada réplica de API (2 workers de uvicorn × pool de 5 + 5) y el ETL abren su propio pool; con 3 réplicas
+se acercan a `max_connections = 100`, y Postgres crea un proceso por conexión. Sin PDB ni reparto, la redundancia de 3
+réplicas es solo teórica: pueden caer juntas en un drenaje o en la caída de un nodo.
+**Notas:** la imagen `bitnami/pgbouncer` ya no está en Docker Hub; se usa `bitnamilegacy/pgbouncer:1.22.1` (sin
+actualizaciones; revisar en la fase 2 o usar el `Pooler` de CloudNativePG). En local, con 1 réplica, el PDB bloquea
+`kubectl drain` (no se puede desalojar el único pod): esperado.
+**Dónde:** commit `8461992` (`04-pgbouncer.yaml`, `05-api.yaml`).
+
+## D23 — API no pública: acceso por token (2026-11-12)
+**Decisión:** la API no se publica (ni en stores ni como servicio abierto). En la nube, el acceso se limita a
+dispositivos propios con un **token en un header** que valida la propia API (401 si falta o no coincide) y,
+opcionalmente, restricción por IP y TLS (cert-manager) en el Ingress.
+**Por qué:** mantiene el proyecto dentro de D8 (datos derivados de TomTom para uso propio/investigación, no
+redistribución pública). El token en la aplicación es portable entre controladores de Ingress (Traefik en local,
+el que se use en AKS), a diferencia de las anotaciones de autenticación de cada controlador.
+**Estado:** implementado antes de la fase 2 para probarlo en local y en Compose — ver D26. Falta TLS en la nube.
+**Dónde:** `08-ingress.yaml` en el commit `8461992`; `docs/KUBERNETES.md` › Fase 2.
+
+## D24 — ETL en modo un ciclo (`--una-vez`) para el CronJob (2026-11-12)
+**Decisión:** `python src/main.py --una-vez` ejecuta un `ciclo_etl` y termina; sin la bandera sigue el daemon de
+Compose (migraciones al arrancar + ciclo cada 15 min), sin cambios.
+**Detalles:**
+- `--una-vez` **no aplica migraciones**: en Kubernetes las aplica una sola vez el `Job` `geotracker-migrate`;
+  hacerlo cada 15 min desde el CronJob solo abriría carreras de DDL.
+- Exit 1 si el ciclo lanza una excepción (el Job queda fallido, con su log); exit 0 en lo demás, incluido
+  "sin datos" por falta de cuota y una pasada de tiles fallida que el ciclo ya absorbe (D12). Un fallo total de
+  TomTom se detecta por métricas (fase 3), no por el exit code.
+- `main(argv)` es testeable: 3 tests nuevos en `tests/test_main.py`.
+
+## D25 — Volumen de la BD en Kubernetes: montar el padre de PGDATA + `fsGroup` (2026-11-12)
+**Decisión:** el PVC se monta en `/home/postgres/pgdata` y `PGDATA=/home/postgres/pgdata/data` (la misma ruta de
+datos que Compose y que la imagen). El pod corre como `1000:1000` con `fsGroup: 1000` y
+`fsGroupChangePolicy: OnRootMismatch`.
+**Por qué:** montar el PVC directamente en `PGDATA` (como Compose) **falla**: un PVC llega con dueño root y `initdb`
+no puede hacer `chmod 0700` ("could not change permissions ... Operation not permitted"). Compose no tiene el
+problema porque un volumen nombrado de Docker copia el dueño del directorio de la imagen. Probado con la imagen
+fijada sobre un directorio root:0777 (como `local-path` de k3d): montaje en `PGDATA` → falla; montaje en el padre →
+arranca. En Azure Disk el disco llega root:0755 con `lost+found`, así que además hace falta `fsGroup` para que
+`postgres` pueda crear `data/`. `local-path` ignora `fsGroup` (es hostPath), pero su 0777 basta.
+
+## D26 — Token de acceso en la API: `X-API-Key` (2026-11-12)
+**Decisión:** todo `/api/v1/*` exige el header `X-API-Key` con uno de los tokens de `API_TOKENS` (lista separada por
+coma, uno por dispositivo); si falta o no coincide → 401 con `WWW-Authenticate: ApiKey`. `/health` y `/docs` quedan
+abiertos. Implementa D23 desde ahora, en Compose y en Kubernetes.
+**Detalles:**
+- **Falla cerrada:** sin tokens, o con alguno de < 32 caracteres, la configuración no se construye y la API no
+  arranca. Solo `API_AUTH_DESACTIVADA=true` la deja abierta (desarrollo; lo avisa en el log).
+- Comparación con `secrets.compare_digest` contra **todos** los tokens (sin cortar en el primero que coincide).
+  El token recibido nunca se registra.
+- La dependencia va en `include_router(..., dependencies=[...])`: cualquier router nuevo bajo `/api/v1` queda
+  protegido sin acordarse de ponerla. `APIKeyHeader` hace que `/docs` muestre el botón "Authorize".
+- `/health` abierto porque lo llaman los probes de Kubernetes y el healthcheck de Compose, que no mandan token.
+  `/docs` solo expone el esquema, no datos; puede cerrarse en la nube si se quiere.
+- Revocar un dispositivo = quitar su token de la lista y reiniciar la API.
+**Verificado:** 11 tests nuevos (`services/api/tests/test_seguridad.py`, sin BD) + los 12 de rutas con el header;
+en vivo en Compose: sin token 401, token incorrecto 401, correcto 200, `/health` 200.
+**Uso:** `curl -H "X-API-Key: $TOKEN" 'localhost:8000/api/v1/rutas?...'` (el token está en `.env`).
+
+## D27 — Secretos de Kubernetes fuera de `base/`: `secretGenerator` desde un archivo no versionado (2026-11-12)
+**Decisión:** se elimina `base/02-secret.yaml`. En local, el `Secret` `geotracker-secret` lo genera Kustomize desde
+`overlays/local/secret.env` (en `.gitignore`; plantilla versionada `secret.env.example`), con
+`disableNameSuffixHash` para conservar el nombre fijo. En la nube lo aportará Sealed/External Secrets (fase 2).
+**Por qué:** un `Secret` en `base/` solo tenía dos salidas malas: con valores vacíos, cada `kubectl apply -k`
+pisaba el secreto real creado por comando; con los valores reales, el archivo (ya versionado en `8461992`) acababa
+en git y en GitHub. El generador lee un archivo que git no ve, y el `apply -k` sigue siendo un solo comando.
+**Consecuencias:** el overlay declara su propio `namespace` (el de la base no alcanza a lo que genera el overlay).
+Con el nombre fijo, cambiar un valor no reinicia los pods: `kubectl rollout restart`. Los valores que estaban en
+`02-secret.yaml` se movieron a `secret.env` y se verificó que coinciden con `.env` y con el `Secret` renderizado.
+
+## D28 — Primer despliegue en k3d: service links, CronJob suspendido e Ingress (2026-11-13)
+**Decisiones:**
+- **PgBouncer con `enableServiceLinks: false` y `PGBOUNCER_PORT` explícito.** Kubernetes inyecta variables por cada
+  Service del namespace; el Service `pgbouncer` genera `PGBOUNCER_PORT=tcp://10.43.x.x:6432`, que choca con la
+  variable homónima de la imagen de Bitnami ("value is not an integer") → `CrashLoopBackOff`, y en cascada fallaban
+  migraciones y ETL (`Connection refused`).
+- **CronJob del ETL suspendido en `overlays/local`** (parche `suspend: true`, declarativo para que `apply -k` no lo
+  reactive). Mientras corre el ETL de Compose, los dos gastarían la misma clave de TomTom con pools `consumo_api`
+  separados (~282 000 de 200 000 tiles/mes), y la BD del cluster aún no tiene la red OSM. Se quita al hacer el corte
+  (fase 4, deteniendo antes el ETL de Compose). Prueba manual: `kubectl create job --from=cronjob/geotracker-etl`.
+- **Ingress con `spec.ingressClassName: traefik`** en lugar de la anotación obsoleta `kubernetes.io/ingress.class`.
+  En AKS la clase será otra y la parchea `overlays/nube`.
+**Verificado:** pods `Running`, Job de migraciones `Complete` (001–012), `/health` ok vía PgBouncer, `apply -k` sin
+warnings; por `port-forward`: sin token 401, con token 503 "La red vial no está cargada" (esperado: falta cargar OSM).
+**Nota operativa:** un `Job` fallido no se re-ejecuta: `kubectl delete job geotracker-migrate` y volver a `apply -k`.
+
+## D29 — Red OSM como `Job` en Kubernetes y corte del ETL de Compose al `CronJob` (2026-11-13)
+**Decisiones:**
+- **`base/09-osm-loader-job.yaml`**: `scripts/osmnx_loader.py` corre como `Job` con la imagen del ETL (el
+  `Dockerfile` ahora copia `scripts/`; se agrega `.dockerignore` para no meter `.env`, `cache/` ni `.git` en el
+  contexto). Un `initContainer` espera a que `schema_migrations` llegue a 005, así un solo `apply -k` sirve aunque
+  el `Job` de migraciones no haya terminado. Va directo a `geotracker-db:5432`, no por PgBouncer: es una carga
+  masiva en una sola transacción y no gana nada con el pool por transacción.
+- **Caché de osmnx en un PVC (`cache-osmnx`, 1 Gi) sembrado desde `./cache` del host.** El Overpass público
+  (`overpass-api.de`) rechaza clientes automatizados: responde un aviso de "monta tu propia instancia" en lugar de
+  JSON (los 3 intentos del primer `Job` fallaron así). Con la caché (mismo bbox y misma versión de osmnx) la carga
+  tardó 27 s y dio la misma red que Compose: 67 464 aristas, 28 008 nodos, 1 componente, 0 aristas sin vértice.
+  Sembrado: `deploy/k8s/tools/sembrar-cache-osmnx.yaml` + `kubectl cp`. Para *actualizar* la red hará falta un
+  Overpass que acepte la carga (instancia propia) o correr el loader en el host y volver a sembrar la caché.
+- **ETL: se apaga el de Compose y se activa el `CronJob`** (se quita el parche `suspend` de D28). El servicio
+  `etl_worker` queda detrás del perfil `etl-compose`, para que un `docker compose up -d` no lo reviva y duplique la
+  cuota; arrancarlo exige `--profile etl-compose` y suspender antes el `CronJob`.
+- **Se copia `consumo_api` del mes a la BD del cluster** antes del primer ciclo. Sin esto el `CronJob` partiría de
+  cero y creería tener la cuota mensual entera (Compose ya llevaba 8 282 tiles y 1 839 Segment Data en noviembre).
+**Verificado:** primer ciclo programado (17:15 UTC) `Complete` en 16 s: presupuesto "mes 7106/200000 antes de hoy",
+49/49 tiles, 14 997 aristas medidas + 52 467 por IDW en `trafico_calles`. `GET /api/v1/rutas` con token devuelve
+una ruta real.
+**Consecuencia — datos partidos:** el histórico (desde 2026-11-09) sigue en la BD de Compose y los ciclos nuevos van
+a la del cluster. Grafana sigue leyendo la de Compose, así que su mapa de calor queda congelado en el último ciclo
+de Compose (17:02 UTC). Pendiente de la fase 4: llevar el histórico al cluster (`pg_dump`/`pg_restore` de datos) y
+desplegar Grafana en el cluster o apuntarlo a su BD.
+
+## D30 — Red OSM desde un extracto `.osm.pbf` en lugar de Overpass (2026-11-13)
+**Contexto:** el Overpass público rechaza clientes automatizados (D29). La caché sembrada desde el host servía para
+la carga inicial, pero congelaba la red en la fecha de la caché y no permitía actualizarla.
+**Decisión:** `osmnx_loader.py` lee por defecto un extracto `.osm.pbf`. Fuente: `OSM_PBF_URL`, por defecto el
+estado de San Luis Potosí en openstreetmap.fr (~15 MB, regenerado a diario; alternativa: México completo en
+Geofabrik). Lo hace `scripts/fuente_pbf.py` con pyosmium (`osmium==4.0.2`). Solo se reemplaza la *descarga* de
+osmnx: el `.pbf` se convierte en la misma respuesta JSON que daría Overpass y `ox.graph_from_bbox` hace el resto
+sin cambios (búfer de 500 m, truncado, componente mayor, simplificación). La selección replica la consulta de
+osmnx:
+- el filtro `drive` se lee del propio osmnx (`_get_network_filter`) y se evalúa con la semántica de Overpass;
+- se toman las vías con algún nodo dentro del polígono, con todos sus nodos;
+- los elementos van ordenados por id y las coordenadas con 7 decimales.
+Usa internals de osmnx fijados por versión (`osmnx==2.1.0`); al subir osmnx hay que repetir la validación.
+`--fuente overpass` conserva el camino anterior (Overpass o su caché) y `--pbf archivo` usa un extracto local.
+**Validación:** mismo bbox, grafo desde la caché de Overpass (2026-11-09) contra grafo desde el extracto
+(datos 2026-11-13T00:49Z): 28 162 nodos y 67 914 aristas en ambos, 0 diferencias en `(u,v,k)` y 0 en
+`osmid`/`highway`/`name`/`oneway`/`maxspeed`/`length`/geometría. En k3d el `Job` tardó 53 s: 0 aristas nuevas,
+67 464 actualizadas, 0 inactivas, 0 aristas sin vértice, 1 componente.
+**Consecuencias:** el `Job` ya no necesita el PVC `cache-osmnx` ni el pod de sembrado (se eliminan); usa un
+`emptyDir` y necesita salida a internet hacia el servidor del extracto. Actualizar la red = borrar el `Job` y
+volver a `apply -k`. Tests: `tests/test_fuente_pbf.py`.
+
+## D31 — Observabilidad: Prometheus para operación, TimescaleDB para negocio, Grafana único (2026-11-13)
+**Contexto:** fase 3 de `KUBERNETES.md`. Grafana sigue en Compose leyendo la BD de Compose (congelada desde el corte de
+D29), sin provisioning (dashboards y datasource solo existen en el volumen `geotracker_grafana_data`), y no hay
+métricas ni alertas: el 2026-11-13 el ETL estuvo ~4 h sin correr (equipo apagado) y nada lo avisó.
+**Decisiones** (cierran las preguntas 9 y 10 de `KUBERNETES.md`):
+- **Dos fuentes, separadas por tipo de dato.** Negocio (congestión, mapa de calor, ETAs) se queda en TimescaleDB;
+  operación (latencia y errores de la API, éxito del ETL, reinicios, disco, cuota) va a Prometheus. La congestión
+  **no** se exporta a Prometheus: ~67 k `osm_id` serían ~67 k series y el histórico ya vive en TimescaleDB.
+- **`kube-prometheus-stack` por Helm con `values` versionados** (`deploy/k8s/platform/`), reducido en local (una
+  réplica, retención 7 días). No contradice D20: Kustomize sigue a cargo de las apps de geoTracker; el chart es
+  plataforma, como Traefik. En la nube lo instala Terraform (D18).
+- **Grafana único: el del chart**, con datasources TimescaleDB + Prometheus y dashboards como ConfigMaps (sidecar
+  de provisioning). Los dashboards de Compose se exportan a JSON y se versionan. El de Compose se retira después
+  de la fase 4 (migración del histórico).
+- **Sin Pushgateway.** El ETL vive ~20 s y su estado ya va a la BD (D7). Salud del job: `kube-state-metrics`
+  (`kube_cronjob_status_last_successful_time`, incluido en el chart). Detalle del ciclo: tabla `ejecuciones_etl`
+  (una fila por ciclo), que se grafica desde TimescaleDB y sobrevive a la retención de Prometheus.
+- **Grafana entra a la BD con un rol de solo lectura** (`grafana_ro`), directo a `geotracker-db:5432`: no con el
+  usuario dueño del esquema, y no por PgBouncer en modo transacción (prepared statements).
+- **Alertas: un solo juego de reglas, motor de notificación por entorno.** Las reglas se escriben una vez como
+  reglas de Grafana provisionadas (pueden consultar Prometheus *y* SQL: cuota en `consumo_api`, frescura de
+  `trafico_calles`). Local: notifica el Alertmanager interno de Grafana (Grafana Alerting); el Alertmanager del
+  chart va desactivado para ahorrar memoria. Nube (AKS): Alertmanager del chart activo; Grafana le envía sus
+  alertas como Alertmanager externo, y ahí llegan también las reglas por defecto del chart (nodos, PVC,
+  reinicios). La diferencia entre entornos queda en los overlays/`values` (`alertmanager.enabled` y el destino de
+  las alertas de Grafana), no en las reglas.
+**Por qué no dos juegos de reglas** (Grafana en local, `PrometheusRule` en la nube): divergen con el tiempo, y lo
+que se prueba en local deja de ser lo que corre en la nube. Además, Prometheus no puede consultar SQL: las
+alertas de cuota y frescura exigirían un exportador extra solo para la nube.
+**Pendiente de verificar al escribir `overlays/nube`:** el envío de alertas de Grafana a un Alertmanager externo
+(datasource de tipo Alertmanager + elección de Alertmanager en la configuración de Grafana) con la versión de
+Grafana que traiga el chart en ese momento.
+
+## D32 — Sondas separadas (`/health/live`, `/health/ready`) y `/metrics` en la API (2026-11-13)
+**Contexto:** las sondas de Kubernetes solo miran el código HTTP, y `/health` responde **200 siempre**, también con
+`"status": "degraded"`: las dos sondas apuntaban ahí y nunca detectaban una BD caída.
+**Decisiones:**
+- **`/health/live`** (liveness) no toca la BD: si la BD cae, reiniciar la API no arregla nada y reiniciaría todas
+  las réplicas a la vez. **`/health/ready`** (readiness) consulta la BD y responde **503** si falla: el Service saca
+  la réplica de la rotación sin matarla. `/health` se conserva igual (informativo). El healthcheck de Compose pasa
+  a `/health/ready`.
+- **`/metrics`** con `prometheus-fastapi-instrumentator==7.1.0` + `prometheus-client==0.21.1` (la 8.x exige
+  Starlette ≥ 1.0, incompatible con `fastapi==0.115.6`). Sin token, igual que `/health`. Etiqueta por plantilla de
+  ruta (nunca por la URL con su query) y excluye las sondas y el propio scrape.
+- **Un worker de uvicorn por contenedor** (antes 2): con varios procesos cada uno tiene sus contadores y cada
+  scrape vería uno al azar. Se escala con réplicas del Deployment; las rutas son `def` (threadpool), así que un
+  worker atiende varias peticiones mientras esperan a la BD.
+- **El Ingress publica solo `/api`, `/docs` y `/openapi.json`** (antes `/` completo). `/metrics` y `/health/*`
+  quedan internos: Prometheus y el kubelet llegan por el Service y el pod.
+- El `ServiceMonitor` se agrega con el stack (D31): su CRD aún no existe en el cluster.
+**Verificado (k3d, 2026-11-13):** tests de la API 29/29 (`tests/test_observabilidad.py` nuevo; los de ruteo contra BD
+real). Por el Service: `/health/live`, `/health/ready`, `/metrics` y la ruta con token → 200, y `http_requests_total`
+etiquetado `handler="/api/v1/rutas"`. Por el Ingress: `/metrics`, `/health`, `/health/ready` → 404; `/docs`,
+`/openapi.json` y la ruta con token → 200; sin token → 401. Con PgBouncer escalado a 0: `/health/ready` 503,
+`/health/live` 200, la réplica pasa a `notReady` en los endpoints y **0 reinicios**; al restaurarlo vuelve a
+`ready` sola.
+
+## D33 — Grafana en el cluster: stack instalado, rol `grafana_ro` y dashboards como código (2026-11-14)
+**Contexto:** implementación de D31 en k3d. El dashboard exportado del Grafana de Compose ("HeatMap SLP Traffic")
+viene en el formato nuevo v2 (`dashboard.grafana.app/v2`) y apunta a un datasource que solo existe en Compose.
+**Decisiones:**
+- **`kube-prometheus-stack` 93.3.0** (`deploy/k8s/platform/kube-prometheus-stack/`): `values.yaml` común +
+  `values-local.yaml`. Release `kps` en el namespace `monitoring`. Helm corre desde la imagen `alpine/helm:3.17.3`
+  (nada instalado en el host). En local: sin Alertmanager, sin los objetivos de control plane que k3s lleva
+  embebidos (etcd, scheduler, controller-manager, kube-proxy, siempre "down"), Prometheus con 7 días en un PVC de
+  5 Gi.
+- **Grafana fijado en `grafana/grafana-oss:13.0.2`** (el chart trae 13.3.1): es la versión de la que salió el
+  dashboard v2 y con la que se comprobó que el provisioning de archivos lo carga, y la misma imagen que Compose.
+  Subirla es una decisión explícita, revisando los dashboards.
+- **Rol `grafana_ro`** (migración 013): solo `SELECT`, privilegios por defecto para tablas futuras, `statement_timeout`
+  30 s y 10 conexiones como máximo. La migración lo crea sin login. La contraseña no va en git: `migrate.py` la asigna
+  si recibe `GRAFANA_DB_PASSWORD`, que viene del Secret. El datasource va directo a `geotracker-db:5432`, no por
+  PgBouncer.
+- **Secretos:** `overlays/local/grafana.env` (fuera de git; plantilla `grafana.env.example`) genera `grafana-secret`
+  en los dos namespaces desde **un solo archivo**: la contraseña que asigna el Job de migraciones (`geotracker`) y la
+  que usa Grafana (`monitoring`) no pueden desalinearse. El overlay deja de declarar `namespace:` global (abarca
+  dos namespaces); cada generador declara el suyo. Se verificó que el render de los objetos existentes no cambia.
+- **Dashboards como código:** `deploy/k8s/platform/kustomization.yaml` genera un ConfigMap por JSON, con la etiqueta
+  `grafana_dashboard=1` y la carpeta "geoTracker", sin sufijo hash (con hash, `apply` dejaría la versión anterior y
+  Grafana vería el mismo uid dos veces). Ahí vive también el `ServiceMonitor` de la API. El overlay incluye
+  `../../platform`.
+- **Cambios al dashboard exportado** (se conserva el formato v2 y el uid `adrdrr6`): las tres consultas apuntan al
+  datasource provisionado `timescaledb`; se quitan los metadatos de la instancia de Compose; los mapas se centran
+  en SLP. **El panel 3 ("mapa de calor") leía `trafico_inferido` (`IDW_GRID`)**, la tabla legada de P10, que ya no
+  se escribe y no existe en el cluster. Ese mapa en Compose muestra datos viejos desde mucho antes del corte de D29.
+  Ahora lee el último ciclo de `trafico_calles`, agregado en celdas de 0.002° (~200 m): 67 464 calles → ~3.3 k
+  puntos, ~0.33 s.
+**Trampa operativa:** `k3d image import` con **dos imágenes en el mismo comando** reportó éxito y dejó en los nodos
+la `geotracker-etl` anterior: el Job de migraciones corrió sin la 013 ("Esquema al día"). Importada sola, sí se
+reemplazó. Importar una imagen por comando y comprobar la fecha con
+`docker exec k3d-geotracker-agent-0 crictl inspecti docker.io/library/<imagen>`.
+**Verificado (k3d, 2026-11-14):**
+- **Tests:** ETL 164/164, con `tests/test_rol_grafana_db.py` nuevo contra BD real (lee hypertables, no escribe, lee
+  tablas futuras, rotación de contraseña, corte a los 30 s); API 29/29.
+- **Grafana 13.0.2:** datasources TimescaleDB (como `grafana_ro`) y Prometheus pasan el health check. El dashboard
+  aparece en la carpeta geoTracker y sus tres consultas, ejecutadas por Grafana, devuelven 19, 207 y 3 333 filas.
+  Un `DELETE` como `grafana_ro` → `permission denied`.
+- **Prometheus:** `up{job="geotracker-api"} = 1`, `http_requests_total` por ruta, y
+  `kube_cronjob_status_last_successful_time` del ETL disponible: base de la alerta "ETL sin correr".
+- **Memoria del stack:** Grafana ~330 MiB, Prometheus ~285 MiB y el resto <70 MiB.
+**Pendiente:** Grafana registra una vez al cargar un `level=error` interno ("[SHOULD NOT HAPPEN] failed to update
+managedFields") sobre el esquema v2; el dashboard funciona. Revisar al subir de versión.
+
+## D34 — IPs estáticas para los nodos de k3d (2026-11-16)
+**Decisión:** los contenedores del cluster `geotracker` se reconectan a la red `k3d-geotracker` con IP fija
+(`server-0` .2, `serverlb` .3, `agent-0` .4, `agent-1` .5).
+**Por qué:** tras dos días apagado, `k3d cluster start` falló: Docker asignó las IPs por orden de arranque y
+`agent-1` (registrado como .5) recibió .3; k3s se apagaba en bucle (`failed to find interface with specified node
+ip`). Se descartó borrar el objeto `Node` para que se re-registre: arregla una vez, pero el problema vuelve en el
+siguiente reinicio. Con IP en la configuración del endpoint, Docker la respeta siempre.
+**Consecuencia:** si se recrea el cluster con `k3d cluster create`, repetir el procedimiento de
+`docs/KUBERNETES.md` ("Observabilidad: operación"). En Azure (fase 2) no aplica.
+
+## D35 — Grafana de Compose apagado (2026-11-16)
+**Decisión:** el servicio `grafana` de Compose pasa al perfil `grafana-compose` (igual que el ETL en D29) y el
+contenedor `grafana_bi` se elimina; el volumen `geotracker_grafana_data` se conserva.
+**Por qué:** lee la BD de Compose, sin datos nuevos desde el 2026-11-13 17:02 UTC (corte de D29): con el rango por
+defecto (últimas 6 h) sus paneles salen vacíos, y con dos Grafana de credenciales distintas (`.env` vs
+`grafana.env`) se confundía cuál era el vigente. El del cluster (D33) es el único.
+**Volver a usarlo:** `docker compose --profile grafana-compose up -d grafana`.
+
+## D36 — Mapa base de los Geomap: OpenStreetMap en lugar de CARTO (2026-11-16)
+**Decisión:** los dos paneles Geomap del dashboard usan `basemap.type = "osm-standard"` (teselas de
+tile.openstreetmap.org) en lugar de `"default"`.
+**Por qué:** `"default"` usa los basemaps de CARTO, que ahora piden API key: el mapa mostraba "API KEY REQUIRED
+carto.com/basemap/apikey" y solo se veían los puntos. OSM no requiere clave; su política de uso de teselas admite
+este volumen (uso interno, un puñado de usuarios). En producción con más tráfico: proveedor con clave o teselas
+propias.
+**Verificado:** captura con Chromium headless (Playwright, locale `es-MX`): las teselas cargan y las 3 consultas
+responden. Nota: sin locale, Chromium headless no arranca Grafana 13 (`RangeError: Incorrect locale information
+provided` en `Intl.NumberFormat`); es del navegador de prueba, no del servidor.
+
+## D37 — Panel 2: calles medidas por tiles coloreadas por congestión (2026-11-16)
+**Decisión:** el panel "GeoMap Traffic" pasa a "Tráfico medido por calle (último ciclo)". Lee `trafico_calles` con
+`metodo_inferencia = 'TILE'` del último ciclo del rango (~15 k aristas, 1 223 km) en lugar de la última lectura de
+Segment Data por punto. Cada arista se densifica en puntos cada 30 m (`ST_LineInterpolatePoints` en UTM 14N) y los
+marcadores (3 px, opacidad 0.9) se colorean con los umbrales 1.3 / 1.7 / 2.5 y morado ≥ 9.99 (cerrada). Orden
+ascendente para que lo congestionado quede encima (las calles de doble sentido son dos aristas).
+**Por qué:** el panel anterior no comunicaba el tráfico: color fijo amarillo, 5 px y opacidad 0.4 sobre un mapa
+de calles amarillas, y Segment Data ya es fuente secundaria (1–4 de 207 puntos por ciclo; había lecturas de hasta
+2.5 días). Geomap no dibuja una línea por segmento (la capa "route" une todos los puntos del frame) y la capa
+GeoJSON solo acepta archivos estáticos; densificar en puntos da trazos continuos a zoom 12–15 sin plugins.
+**Costo:** ~38 k puntos, ~0.3 s en la BD y ~3.4 MB por carga del panel. Si pesa, subir el paso a 50 m o filtrar
+`tipo_via`. Las aristas inferidas (`IDW_TILE`) siguen en el panel 3.
+**Verificado:** capturas con Chromium (vista completa y zoom al centro): trazos continuos coloreados, leyenda con los
+5 rangos y tooltip con calle, tipo de vía y hora del ciclo.
+
+## D38 — Panel 1 como serie de tiempo sobre un continuous aggregate (2026-11-17)
+**Decisión:** el panel 1 ("HeatMap SLP Traffic", heatmap sobre Segment Data) pasa a "Congestión por ciclo (calles
+medidas)", serie de tiempo con la congestión promedio (eje izquierdo) y el % de aristas con congestión ≥ 1.3 (eje
+derecho, punteado). Lee el continuous aggregate `resumen_trafico_ciclo` (migración 014). Huecos > 30 min sin unir
+(`insertNulls`) para que los ciclos perdidos se vean.
+**Por qué:** Segment Data mide 1–4 puntos por ciclo (5 filas en 6 h): la serie no representaba la ciudad. Las
+~15 k aristas medidas por tiles sí, pero agregar `trafico_calles` (67 k filas por ciclo) en cada carga tardó ~8 s
+con solo 90 ciclos y crece lineal con el histórico; con el aggregate, ~30 ms. Solo aristas `TILE`: las `IDW_TILE`
+son interpoladas y diluyen la señal. El % complementa al promedio, que con 15 k aristas mayormente libres se
+mueve poco (1.00–1.18).
+**Alternativas descartadas:** tabla de resumen escrita por `predictor.py` (más código en el ETL y otra ruta de
+escritura que mantener idempotente); `migrate.py` con migraciones fuera de transacción (innecesario: `WITH NO DATA`
+permite crear el aggregate dentro y la política hace el refresco inicial).
+**Verificado:** `tests/test_resumen_trafico_db.py` (4 tests: solo `TILE`, umbrales, igual en vivo y materializado,
+lectura como `grafana_ro`, política registrada); suite ETL 168/168. Migración aplicada en k3d por el Job; captura
+del panel con 2 días de datos.
+
+## D39 — Memoria de PostgreSQL dimensionada al límite del pod (2026-11-17)
+**Decisión:** el StatefulSet de la BD pasa `args` a `postgres` con `shared_buffers=256MB`,
+`effective_cache_size=768MB`, `work_mem=8MB`, `maintenance_work_mem=64MB`, `autovacuum_max_workers=3`,
+`max_parallel_workers_per_gather=1` y `max_parallel_workers=2`, acordes con `limits.memory: 1Gi`.
+**Por qué:** al cargar el dashboard (D37/D38) el pod de la BD murió con **OOMKilled** (exit 137) y arrancó con
+recuperación del WAL. El `postgresql.conf` del volumen se generó al hacer `initdb` con valores para todo el host
+(16 CPU, ~8 GB): `shared_buffers` 1955 MB, `maintenance_work_mem` 1 GB × 10 workers de autovacuum y 8 workers
+paralelos por consulta, muy por encima del límite de 1 GiB. Ya acumulaba 3 reinicios. Con `-c` en la línea de
+comandos se sobrescribe el archivo sin tocar el volumen y queda versionado; `ALTER SYSTEM` habría dejado la
+configuración dentro del PVC, fuera de git.
+**Verificado:** `pg_settings` muestra los 7 valores con `source = command line`; dos cargas completas del dashboard
+(3 paneles, 2 días) sin reinicio; working set máximo 688 MiB (pico del cgroup 877 MiB, incluye page cache).
+**Pendiente:** si el pico real crece con el histórico, subir el límite a 1.5 Gi antes que bajar `shared_buffers`.
+En CloudNativePG (fase 2) estos valores van en `spec.postgresql.parameters`.
+
+## D40 — Alerta "ETL sin correr" como código, panel de estado del ETL y peso del panel 3 (2026-11-17)
+**Decisión:**
+- **Alerta:** regla de Grafana provisionada desde `deploy/k8s/platform/grafana/alerts/etl.yaml` (ConfigMap con
+  `grafana_alert=1`; sidecar de alertas activado en `values.yaml`). Consulta Prometheus:
+  `(time() - max(kube_cronjob_status_last_successful_time{cronjob="geotracker-etl"})) / 60 > 45`, evaluada cada
+  1 min con `for: 2m`. `noDataState: Alerting`: sin la serie (kube-state-metrics caído o el CronJob borrado) no se
+  puede afirmar que el ETL corre.
+- **Panel 4:** "ETL: minutos desde el último ciclo exitoso", la misma expresión como stat (verde < 20, naranja < 45,
+  rojo ≥ 45).
+- **Panel 3:** el peso del heatmap es `least(greatest(congestión − 1, 0), 1.5)` con rango fijo 0–1.5. Con la
+  congestión cruda (≥ 1) todas las celdas pesaban casi igual y el mapa mostraba densidad de calles, no tráfico.
+**Por qué 45 min y `for: 2m`:** 3 ciclos perdidos de `*/15` (umbral de "Alertas iniciales" en `KUBERNETES.md`): un
+Job lento o un ciclo saltado no alerta; una caída real sí. El equipo se apaga a diario: al encender, la alerta
+dispara ~2 min después de que Grafana arranca y se resuelve tras el primer ciclo. Es correcto (esas horas no tienen
+datos) y sirve como prueba diaria de que la cadena métrica → regla → estado funciona.
+**Sin punto de contacto todavía:** el de por defecto es correo sin SMTP; las alertas solo se ven en Grafana
+(Alerting → Alert rules). Elegir un canal (correo con SMTP, Telegram, Discord, ntfy…) es la siguiente decisión.
+**Verificado (k3d):** la regla carga con `provenance: file` en la carpeta geoTracker y se evalúa sin error (estado
+Normal, 1–2 min desde el último ciclo). Camino de disparo: una copia temporal con umbral 0 pasó a **Alerting** con
+la descripción renderizada ("…hace 1 min…") y se borró. Captura del dashboard: panel 4 en verde ("2 min"), panel 3
+con focos de congestión en lugar de un manto uniforme. BD sin reinicios.
+
+## D41 — Tabla `ejecuciones_etl` y el resto de las alertas iniciales (2026-11-17)
+**Decisión — `ejecuciones_etl` (migración 015):** una fila por ciclo con estado (`ok` / `sin_datos` / `error`),
+aristas medidas, peticiones y bloqueo por fuente, si corrió el predictor, el error y el pod. La escribe
+`src/ejecuciones.py` desde `main.ciclo_etl` en un `finally`: queda la fila aunque el ciclo falle, y si el registro
+falla el ciclo sigue (es observabilidad, no debe tumbar la medición). Los errores absorbidos (pasada de tiles que
+falla con Segment Data de respaldo) también se anotan: el Job sale con 0 y `kube-state-metrics` no los ve.
+**Decisión — reglas** (`platform/grafana/alerts/`, un archivo por dominio, ConfigMap `grafana-alertas`):
+
+| Regla | Fuente | Condición | `for` | Sin datos |
+|---|---|---|---|---|
+| ETL sin correr (D40) | Prometheus | > 45 min sin Job exitoso | 2m | Alerta |
+| ETL sin datos de tiles | `ejecuciones_etl` | ≥ 3 ciclos en 50 min y ninguno midió aristas | 1m | OK |
+| TomTom respondió 403 | `consumo_api` | `bloqueado` hoy (hora de SLP), por API | 0s | OK |
+| Consumo de TomTom por encima del ritmo | `consumo_api` | acumulado del mes > cuota × día / días del mes, por API | 10m | OK |
+| API de rutas no disponible | Prometheus | réplicas disponibles < 1 (pasan `/health/ready`, que prueba la BD) | 2m | Alerta |
+| API /rutas lenta | Prometheus | p95 de `/api/v1/rutas` en 10 min > 2 s | 5m | OK |
+| BD por encima del 80 % de su disco | SQL + Prometheus | `pg_database_size` / tamaño solicitado del PVC > 80 % | 10m | NoData |
+
+**Por qué así:**
+- **Ritmo de cuota = 100 % del ritmo uniforme**, no un porcentaje arbitrario: `presupuesto.py` planifica con el
+  90 % repartido entre los días restantes, así que el ETL solo nunca lo supera. Pasarlo significa otro consumidor
+  de la misma key (el ETL de Compose encendido, un script) o un bug del presupuesto. Las cuotas van fijas en el SQL
+  de la regla; mantenerlas alineadas con `TOMTOM_CUOTA_MENSUAL` / `TOMTOM_TILES_CUOTA_MENSUAL`.
+- **Disco con SQL ÷ PVC y no con `kubelet_volume_stats`:** en k3d los volúmenes local-path son directorios del
+  host y kubelet reporta el disco entero (~1 TB, 10 % usado), no el PVC. El tamaño de la BD frente a lo solicitado
+  funciona igual en local y en Azure Disk (donde el tamaño sí es real). No cuenta el WAL; el 20 % restante lo cubre.
+- **p95 con `and on() … > 0`:** sin tráfico el cuantil es NaN; así queda "sin datos" (OK) en lugar de un valor
+  indefinido.
+- **"ETL sin datos de tiles" exige ≥ 3 ciclos (`HAVING`):** al encender el equipo hay 0–2 filas recientes; sin
+  ese mínimo dispararía junto con "ETL sin correr" por la misma causa.
+- **Sin `postgres_exporter` por ahora:** las alertas de BD que pide el plan se cubren con SQL; el exportador
+  (conexiones, locks, compresión) queda para cuando haga falta graficarlo.
+**De paso:** `tests/test_asociador_db.py` y `tests/test_rol_grafana_db.py` usaban timestamps fijos (9 y 13 de
+noviembre). Al cumplir 7 días, la política de compresión (008) empezó a comprimir esos chunks en la BD temporal
+mientras el test insertaba → *deadlock*. Ahora usan una hora reciente relativa a `now()`.
+**Verificado (k3d, 2026-11-17):**
+- **Tests:** `test_ejecuciones.py` (8) y `test_ejecuciones_db.py` (4); suite ETL 180/180.
+- **Ciclo real (16:45 UTC):** fila `ok`, 15 031 aristas, 49 peticiones de tiles, 7 de Segment Data, predictor, 9.8 s,
+  `pod = geotracker-etl-29915565-qks4m`. Panel "ETL: últimos ciclos" la muestra.
+- **Reglas:** las 7 cargadas (`provenance: file`), salud `ok`, estado Normal; las de `consumo_api` crean una
+  instancia por API. Valores al verificar: ritmo Segment Data 28 %, tiles 12 %; BD 10.6 % del PVC; p95 `/rutas`
+  0.48 s (8 peticiones reales; la etiqueta `handler="/api/v1/rutas"` existe).
+- **Disparo de una regla SQL:** copia temporal de "Consumo por encima del ritmo" con umbral 0 → dos alertas
+  Alerting ("tomtom_flow_segment va al 28 % del ritmo mensual", "…vector_tiles va al 12 %…"); borrada después.
+- **Reemplazo del ConfigMap:** `grafana-alertas-etl` → `grafana-alertas`. Al borrar el viejo, el sidecar quitó
+  `etl.yaml` y lo reescribió desde el nuevo (mismo nombre de archivo): la regla "ETL sin correr" siguió cargada.
+
+## D42 — Notificaciones push al celular con ntfy (2026-11-17)
+**Decisión:** punto de contacto de Grafana `ntfy-celular` (webhook) hacia `https://ntfy.sh/<tema>`, más la política
+de notificación (todas las alertas a ese punto) y una plantilla de mensaje, provisionados desde git en
+`platform/grafana/alerts/notificaciones.yaml` (mismo ConfigMap `grafana-alertas`). El tema va en `grafana.env`
+(`NTFY_URL`, fuera de git) y llega al pod por `envValueFrom`; Grafana lo interpola en el archivo (`${NTFY_URL}`).
+- **Formato:** el webhook manda el JSON de Grafana; ntfy, con `?tpl=1&t={{.title}}&m={{.message}}`, toma título y
+  cuerpo de ese JSON. Título: `🔴 <regla>` o `✅ Resuelta: <regla>` (usa `rulename` cuando Grafana renombra la
+  alerta a `DatasourceNoData`/`DatasourceError`); cuerpo: `summary` + `description`.
+- **Agrupación:** por carpeta y regla; `group_wait` 30 s, `repeat_interval` 4 h (una alerta que sigue disparando
+  se repite cada 4 h, no en cada evaluación).
+- **Sin silencio al arrancar:** el par diario "ETL sin correr" → "Resuelta" sirve de aviso de que el cluster volvió.
+- **"BD por encima del 80 %": sin datos pasa de NoData a OK.** Con el punto de contacto activo apareció un falso
+  `DatasourceNoData`: el equipo se suspendió (huecos en todas las series de Prometheus, 02:08–02:26 y 03:53–04:27
+  UTC) y las dos evaluaciones de esa regla (cada 10 min) cayeron en el hueco. El disco crece despacio y una BD
+  ausente ya la avisan "API no disponible" y "ETL sin correr".
+**Por qué ntfy:** gratis, sin cuenta, app Android/iOS, y acepta un POST simple. Alternativas: Telegram (bot +
+token), correo (requiere SMTP), Pushover (de pago).
+**Riesgos:**
+- **El tema es la credencial** en `ntfy.sh` público: quien lo conozca lee y publica en él. El tema actual
+  (`geotracker`) es corto y adivinable; el contenido son nombres de reglas y valores, sin secretos. Para cambiarlo:
+  nuevo tema en la app → `NTFY_URL` en `grafana.env` → `apply -k` → `kubectl rollout restart deployment/kps-grafana
+  -n monitoring`.
+- **Si el equipo está apagado o colgado no hay aviso:** Grafana corre en el mismo equipo. Cubrirlo requiere un
+  vigilante externo (*dead man's switch*, p. ej. healthchecks.io); queda para la fase en la nube.
+**Verificado (k3d, 2026-11-17):** contacto, política y plantilla cargados (`provenance: file`, URL interpolada);
+regla temporal que siempre dispara → push `🔴 PRUEBA notificación al celular` ~2.5 min después; con umbral
+inalcanzable → `✅ Resuelta: …`. **Borrar el ConfigMap no borra una regla provisionada:** queda en la BD de
+Grafana; se elimina con un archivo `deleteRules` (uid) y después se borra ese ConfigMap.
+
+## D43 — Fase 4: histórico de Compose al cluster por fusión con traducción de `osm_id` (2026-11-20)
+**Decisión:** el histórico anterior al corte (D29, `2026-11-13 17:15 UTC`) se copia de la BD de Compose a la del
+cluster con `deploy/k8s/scripts/migrar_historico_compose.sh` (+ `fusionar_historico.sql`): respaldo `pg_dump -Fc`
+del cluster → `COPY` de Compose a archivos → tablas de paso `UNLOGGED` en un esquema `fase4` → **una transacción**
+que traduce `osm_id` e inserta → refresco de `resumen_trafico_ciclo` → compresión de chunks > 7 días → verificación
+por día contra Compose. Compose solo se lee. Re-ejecutable: si el cluster ya tiene datos antes del corte salta la
+fusión, y si `fase4` quedó completo de una corrida anterior reanuda ahí.
+**Por qué no `pg_dump`/`pg_restore` completo (lo que decía el plan):**
+- El cluster ya tenía 7 días de datos propios; un restore completo chocaba con ellos o los reemplazaba.
+- **La misma red tiene otros `osm_id`.** Las 67 464 aristas coinciden por `(u,v,k)`, pero 24 574 conservan en Compose
+  su `osm_id` "adoptado" (migración 004); el cluster, cargado desde cero (D30), usa `blake2b(u,v,k)` en todas. Copiar
+  el histórico tal cual habría fallado por la FK o, peor, colgado lecturas de aristas equivocadas. Se traduce
+  `osm_id(Compose) → (u,v,k) → osm_id(cluster)`; la transacción aborta si alguna arista o lectura queda sin pareja.
+- `consumo_api` ya se había copiado en el corte (D29); no se toca. `trafico_inferido` (legado, P10) no existe en el
+  esquema del cluster y no se copia.
+- Hechos sin `ON CONFLICT`: el rango es anterior al corte y vacío en el cluster; un choque sería un supuesto roto y
+  debe abortar. `dim_segmentos_viales`, con `ON CONFLICT DO NOTHING`: entran los 275 segmentos de Compose que no
+  sobrevivieron a la deduplicación (440 → 207); solo dan nombre a lecturas antiguas (el predictor usa los que tienen
+  lecturas recientes).
+**Problema encontrado:** con 690 MB por stdin, `kubectl exec -i` se quedó colgado *después* de que el `COPY` ya había
+terminado en el servidor. El script ahora manda el flujo comprimido (`gzip | kubectl exec … gunzip | psql`).
+**Verificado (k3d, 2026-11-20):**
+- Respaldo previo: `~/geotracker-respaldos/k8s-antes-fase4-20261120T011225Z.dump` (301 MB, legible con `pg_restore -l`).
+- Copiado: `trafico_calles` 11 573 892 (desde 2026-06-17), `fact_flujo_aristas` 2 460 732 (desde 2026-11-09),
+  `fact_lecturas_trafico` 18 868 (desde 2026-06-10). Fusión ≈ 2 min; el `CronJob` corrió a la vez sin problema.
+- Por día y tabla (27 combinaciones), conteos y sumas exactas en `numeric` **idénticos** a Compose, incluida una suma
+  ponderada por `u` que detectaría una arista mal traducida. Los 482 segmentos de Compose están en el cluster.
+- Ruta de prueba (criterio de la fase): Dijkstra a flujo libre entre los mismos nodos da la misma secuencia de 82
+  nodos y 426.979 s en ambas BD (= `duracion_flujo_libre_s` de la API de Compose); el costo libre de toda la red
+  coincide. Por la API difieren solo por el tráfico: Compose no tiene tráfico vigente, el cluster sí.
+- Segunda corrida: salta la fusión y la verificación vuelve a pasar. BD del cluster: 2.3 → 3.0 GB.
+**Pendiente:** retirar la BD de Compose (la API de Compose sigue encendida contra ella). Con eso se resuelve P10.
+→ Hecho en D44.
+Diferencia observada, no causada por esta fase: pgRouting 4.0.1 en Compose y 4.0.2 en el cluster.
+
+## D44 — Compose retirado: BD y API apagadas, todo tras perfiles (2026-11-20)
+**Decisión:** `trafico_db` y `geotracker_api` se detienen (`docker compose stop`; contenedores y volumen
+`geotracker_datos_postgres` se conservan) y pasan a perfiles, igual que el ETL (D29) y Grafana (D35):
+`timescaledb` en `compose`, `etl-compose` y `grafana-compose` (todos dependen de ella); `api` en `compose`. Sin
+perfil, `docker compose up -d` no arranca nada. El entorno vigente es solo el cluster.
+**Por qué:**
+- Tras D43 la BD de Compose no tiene nada que el cluster no tenga (salvo `trafico_inferido`, legado) y no recibe datos
+  desde el 2026-11-13; su API respondía rutas sin tráfico vigente, lo que se confunde con la del cluster.
+- `restart: unless-stopped` ya la deja apagada tras reiniciar Docker, pero un `docker compose up -d` (comando que
+  antes estaba en `CLAUDE.md`) la volvía a levantar; el perfil lo impide.
+- La API de Compose y el `port-forward` de la del cluster usan el mismo `localhost:8000`.
+**Se conserva:** el volumen (vuelta atrás: `docker compose --profile compose up -d`) y el respaldo de D43. Borrar el
+volumen queda para cuando el cluster tenga respaldos automáticos (fase 5); hoy es la segunda copia del histórico
+anterior al corte.
+**Consecuencias:**
+- P10 resuelto: `trafico_inferido` solo vive en ese volumen.
+- Tests de integración (`tests/test_asociador_db.py`): levantar solo la BD con
+  `docker compose --profile compose up -d --wait timescaledb`; no se apuntan a la BD del cluster porque crean y borran
+  bases de datos.
+**Verificado (2026-11-20):** ambos contenedores salieron con código 0; `docker compose config --services` sin perfil
+no lista nada, `compose` → `timescaledb api`, `etl-compose` → `timescaledb etl_worker`, `grafana-compose` →
+`timescaledb grafana`; `docker compose up -d --dry-run` sin perfil → "no service selected". El cluster siguió en
+`Running`.
+
 ## D10 — Imagen del ETL reproducible (2026-11-09)
 **Decisión:** `Dockerfile` de una sola etapa sobre `python:3.11.15-slim-trixie` y todas las dependencias con
 versión exacta (las que tenía la imagen en uso).

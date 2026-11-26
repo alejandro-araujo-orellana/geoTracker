@@ -1,0 +1,60 @@
+# ============================================================================
+# kube-prometheus-stack — LOCAL (k3d) overrides, on top of values.yaml
+# ============================================================================
+# Alerting (D31): ONE set of rules, written as provisioned Grafana alert rules.
+#  - local (this file): Grafana Alerting notifies by itself; the chart's
+#    Alertmanager is off to save memory.
+#  - nube (values-nube.yaml, phase 2): alertmanager.enabled=true and
+#    grafana.sidecar.datasources.alertmanager.handleGrafanaManagedAlerts=true,
+#    so Grafana forwards its alerts to that Alertmanager.
+# Only these switches differ between environments, never the rules.
+# ============================================================================
+
+alertmanager:
+  enabled: false
+
+grafana:
+  sidecar:
+    datasources:
+      # Without Alertmanager the chart would still provision a datasource for it.
+      alertmanager:
+        enabled: false
+  # Measured 2026-11-14: ~330 MiB idle with the chart dashboards + geoTracker's.
+  # Geomap queries (3.3 k points) add on top: keep headroom.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 384Mi
+    limits:
+      memory: 768Mi
+
+prometheus:
+  prometheusSpec:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+      limits:
+        memory: 1Gi
+
+# k3s runs etcd, controller-manager, scheduler and kube-proxy embedded in the k3s
+# binary: there are no pods/endpoints to scrape, so these targets would only be
+# permanently "down" and their rules would fire forever.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  rules:
+    alertmanager: false
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false

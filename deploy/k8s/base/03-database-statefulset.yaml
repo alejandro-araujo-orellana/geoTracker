@@ -1,0 +1,158 @@
+##
+#  03-database-statefulset.yaml
+##
+#
+#  First option for the DB allocation (LOCAL).
+#
+#  Why StatefulSet over a Deployment for the DB?
+#  A deployment treats their pods as dispensable and interchangable assets, any of them
+#  is valid, their name doesn't matter and none of them have a designated disk allocation
+#  for storage. A database should have all of this rights and this service does not deliver
+#  them. Meanwhile StatefulSet gives to all the pods an stable name (geotracker-db-0) and a
+#  volume on which they can mount on the same pod again, no matter if it was rebooted, 
+#  exactly what a DB needs.
+#
+#  Only one issue: it has one replica, if the pod dies, there will be no DB for seconds or
+#  even minutes.
+#
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: geotracker-db
+  namespace: geotracker
+spec:
+  serviceName: geotracker-db          # Service headless name
+  replicas: 1                          # only one local instance
+  selector:
+    matchLabels:
+      app: geotracker-db
+  template:
+    metadata:
+      labels:
+        app: geotracker-db
+    spec:
+      # The image runs as postgres (uid/gid 1000). fsGroup makes the kubelet give
+      # gid 1000 group-write on the volume, so postgres can create PGDATA on disks
+      # that arrive as root:0755 (Azure Disk). local-path (k3d) is hostPath-based
+      # and ignores fsGroup, but its 0777 dir already allows it.
+      # OnRootMismatch: only walks the volume when the root's ownership is wrong
+      # (avoids a slow recursive chown on every restart once the DB has data).
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: timescaledb
+          # Image charged contains the following: PostgreSQL 15.2 + TimescaleDB 2.10.2 +
+          # PostGIS 3.3.2 + pgRouting 4.0.1. En local, this image
+          # should be charged on the cluster service.
+          image: geotracker-timescaledb:pg15.2-ts2.10.2
+          imagePullPolicy: IfNotPresent   # uses the local image if already exists
+          # Memory settings sized for the 1Gi limit below (D39). The postgresql.conf in
+          # PGDATA was tuned at initdb for the whole host (shared_buffers ~2GB,
+          # maintenance_work_mem 1GB x 10 autovacuum workers, 8 parallel workers per
+          # query): heavy Grafana queries got the pod OOMKilled (2026-11-17).
+          # `-c` overrides the file; keep these in sync with resources.limits.memory.
+          args:
+            - postgres
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - effective_cache_size=768MB
+            - -c
+            - work_mem=8MB
+            - -c
+            - maintenance_work_mem=64MB
+            - -c
+            - autovacuum_max_workers=3
+            - -c
+            - max_parallel_workers_per_gather=1
+            - -c
+            - max_parallel_workers=2
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: geotracker-config
+                  key: DB_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: geotracker-config
+                  key: DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            # Same data path as Compose and the image default (timescaledb-ha):
+            # /home/postgres/pgdata/data.
+            - name: PGDATA
+              value: /home/postgres/pgdata/data
+          # The PVC is mounted on the PARENT of PGDATA, not on PGDATA itself.
+          # Compose mounts the volume straight on .../data and it works because a
+          # Docker named volume copies the image's ownership (postgres). A PVC
+          # arrives owned by root (local-path: 0777; Azure Disk: 0755 + lost+found)
+          # and initdb fails with "could not change permissions ... Operation not
+          # permitted" (tested 2026-11-12). Mounting on the parent lets postgres
+          # create .../data itself, so it owns it. D25.
+          volumeMounts:
+            - name: datos-postgres
+              mountPath: /home/postgres/pgdata
+          # Probes: Kubernetes verifies that Postgres responds before sending
+          # traffic (readiness) and it restarts if it hangs (liveness).
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "user", "-d", "vialidades_slp"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "user", "-d", "vialidades_slp"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          # requests/limits: of our measured base-line (KUBERNETES.md: BD ~364 MiB
+          # en reposo). requests = what we reserves; limits = roof. It gives
+          # margin because the predictor with 67k streets it's going to peak.
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+  # volumeClaimTemplates: StatefulSet creates a PersistentVolumeClaim (PVC)
+  # by cloning. PVC is the "disk solitude" — Kubernetes assigns a 
+  # real volume. this disk survives no matter if the pod dies or lives, 
+  # exactly what a DB needs for. In local, k3d uses "local-path" by default.
+  volumeClaimTemplates:
+    - metadata:
+        name: datos-postgres
+      spec:
+        accessModes: ["ReadWriteOnce"]   # only one node writes on the disk
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ── Service headless for StatefulSet ──
+# "Headless" (clusterIP: None) means no balancing: it gives an direct DNS to
+# each pod by his name (geotracker-db-0.geotracker-db). For a BD with
+# identity is what it needs, not a blind balancing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: geotracker-db
+  namespace: geotracker
+spec:
+  clusterIP: None
+  selector:
+    app: geotracker-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

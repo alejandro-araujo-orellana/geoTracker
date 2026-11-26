@@ -21,10 +21,123 @@ Graciano Sánchez.
 3. **Rutear** (próxima fase): ruta más rápida real entre el usuario y un destino usando Dijkstra
    (pgRouting) con costos ponderados por la congestión actual.
 
+### Diagrama de componentes (UML)
+
+Qué piezas hay, qué datos intercambian y en qué tablas escriben o leen. El despliegue (pods, nodos, namespaces)
+está en `KUBERNETES.md`.
+
+```mermaid
+flowchart LR
+    subgraph EXT["Sistemas externos"]
+        TTT["«servicio» TomTom<br/>Traffic Flow vector tiles"]
+        TTS["«servicio» TomTom<br/>Flow Segment Data"]
+        PBF["«archivo» Extracto OSM .osm.pbf"]
+    end
+
+    subgraph ETL["«componente» ETL — src/main.py --una-vez (CronJob */15)"]
+        PRES["presupuesto.py<br/>cupo por ciclo"]
+        XT["extractor_tiles.py"]
+        ASO["asociador.py"]
+        XS["extractor.py"]
+        TRF["transformer.py"]
+        LDR["loader.py"]
+        PRED["predictor.py (v3: TILE + IDW)"]
+        EJE["ejecuciones.py"]
+    end
+
+    OSML["«componente» osmnx_loader.py<br/>(Job)"]
+    MIG["«componente» migrate.py<br/>(Job)"]
+
+    subgraph BD["«base de datos» PostgreSQL + TimescaleDB + PostGIS + pgRouting"]
+        T_RED[("dim_calles_osm<br/>dim_calles_osm_vertices_pgr")]
+        T_FLU[("fact_flujo_aristas")]
+        T_SEG[("dim_segmentos_viales<br/>fact_lecturas_trafico")]
+        T_TC[("trafico_calles")]
+        T_CTL[("consumo_api<br/>ejecuciones_etl")]
+        F_RUTA[["ruta_mas_rapida()<br/>v_costos_grafo / v_tiempo_libre"]]
+    end
+
+    API["«componente» API FastAPI<br/>GET /api/v1/rutas"]
+    OBS["«componente» Grafana + Prometheus"]
+    CEL["«actor» Celular / cliente"]
+    NTFY["«servicio» ntfy.sh"]
+
+    PRES -.->|lee/escribe| T_CTL
+    TTT -->|49 tiles| XT --> ASO -->|aristas dirigidas| T_FLU
+    TTS -->|207 puntos| XS --> TRF --> LDR --> T_SEG
+    T_FLU --> PRED
+    T_SEG --> PRED
+    PRED --> T_TC
+    EJE -->|1 fila por ciclo| T_CTL
+    PBF --> OSML --> T_RED
+    MIG -->|DDL db/migrations| BD
+    T_RED --> F_RUTA
+    T_TC --> F_RUTA
+    T_FLU -->|cerradas| F_RUTA
+    CEL -->|X-API-Key| API --> F_RUTA
+    OBS -->|grafana_ro| BD
+    OBS -->|scrape /metrics| API
+    OBS -->|alertas| NTFY
+```
+
+### Ciclo del ETL (UML: secuencia)
+
+Un ciclo de `ciclo_etl()` (`src/main.py`). Un fallo de tiles no impide Segment Data; el ciclo siempre deja su
+fila en `ejecuciones_etl`, aunque falle (D41).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CJ as CronJob geotracker-etl
+    participant M as main.py
+    participant P as presupuesto
+    participant XT as extractor_tiles
+    participant A as asociador
+    participant XS as extractor + transformer + loader
+    participant PR as predictor
+    participant BD as Base de datos
+    participant TT as TomTom
+
+    CJ->>M: python src/main.py --una-vez
+    M->>M: ResumenCiclo.iniciar()
+    rect rgba(127,127,127,0.08)
+    note over M,TT: 1. Fuente principal: vector tiles
+    M->>P: planificar_tiles()
+    P->>BD: consumo del mes (consumo_api)
+    P-->>M: Cupo
+    M->>XT: extraer(cupo)
+    XT->>TT: hasta 49 tiles (asíncrono)
+    TT-->>XT: tramos con traffic_level / road_closure
+    M->>P: registrar_consumo(tiles)
+    M->>A: asociar_y_guardar(tramos)
+    A->>BD: INSERT fact_flujo_aristas
+    end
+    rect rgba(127,127,127,0.08)
+    note over M,TT: 2. Fuente secundaria: Segment Data
+    M->>P: planificar_ciclo() → puntos más antiguos
+    M->>XS: run_extraction(puntos)
+    XS->>TT: Flow Segment Data (semáforo 20, backoff)
+    M->>P: registrar_consumo(segment)
+    XS->>BD: upsert dim_segmentos_viales + fact_lecturas_trafico
+    end
+    alt sin datos de ninguna fuente
+        M->>M: estado = sin_datos
+    else hay datos
+        M->>PR: ejecutar()
+        PR->>BD: trafico_calles (TILE + IDW_TILE, o respaldo IDW_OSM)
+        M->>M: estado = ok
+    end
+    M->>BD: ejecuciones.registrar(resumen) — siempre (finally)
+    M-->>CJ: exit 0 / 1
+```
+
 ## 1. Infraestructura y despliegue (Docker)
 
 * **Paridad de entornos:** desarrollo y producción usan exclusivamente Docker Compose. No se instalan dependencias globales en el anfitrión. ✅
-* **Servicios oficiales** (`docker-compose.yml`, Compose v2+, red `red_trafico`, todos con `restart: unless-stopped` — D17):
+* **Entorno vigente: Kubernetes** (k3d local; manifiestos en `deploy/k8s/`, ver `docs/KUBERNETES.md`). Desde D44,
+  todos los servicios de Compose están detrás de perfiles (`compose`, `etl-compose`, `grafana-compose`) y apagados;
+  la tabla siguiente describe Compose, que se conserva para pruebas locales (p. ej. la BD de los tests de integración).
+* **Servicios de Compose** (`docker-compose.yml`, Compose v2+, red `red_trafico`, todos con `restart: unless-stopped` — D17):
 
   | Servicio | Contenedor | Imagen / build | Puerto |
   |---|---|---|---|

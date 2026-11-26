@@ -1,0 +1,136 @@
+# ============================================================================
+# 09-osm-loader-job.yaml — Load the OSM road network (phase 2) into the DB
+# ============================================================================
+# Runs scripts/osmnx_loader.py ONCE: downloads the drive network of the study
+# zone (src/zona.py) from OpenStreetMap and upserts it into dim_calles_osm and
+# dim_calles_osm_vertices_pgr. Without it the predictor has no streets to
+# infer over and /api/v1/rutas answers 503 ("La red vial no está cargada").
+#
+# Same pattern as the migrations Job (07): a Job, not part of the ETL cycle,
+# because the network only changes every few months. The loader is idempotent
+# (upsert by (u,v,k), removed edges marked activo = FALSE), so re-running it is
+# safe. A completed Job is NOT re-run by `apply -k`; to refresh the network:
+#   kubectl delete job geotracker-osm-loader -n geotracker
+#   kubectl apply -k deploy/k8s/overlays/local
+#
+# Order: needs migrations >= 005. Applying everything at once is fine: the
+# initContainer waits for the migrations Job to get there, so the (slow)
+# download never starts against an empty schema. D29.
+#
+# Source (D30): an .osm.pbf extract (OSM_PBF_URL; default: San Luis Potosí
+# state from openstreetmap.fr, ~15 MB, rebuilt daily), NOT the Overpass API: the
+# public overpass-api.de refuses automated clients. scripts/fuente_pbf.py feeds
+# osmnx the same ways Overpass would return, so the graph is identical (validated
+# edge by edge against the Overpass cache). Needs egress to the download host.
+# ============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geotracker-osm-loader
+  namespace: geotracker
+spec:
+  backoffLimit: 2            # each attempt re-downloads from Overpass; don't hammer it
+  activeDeadlineSeconds: 1800
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: esperar-migraciones
+          image: geotracker-etl:latest
+          imagePullPolicy: IfNotPresent
+          # Polls schema_migrations every 5 s (max ~10 min) until version >= 005.
+          command:
+            - python
+            - -c
+            - |
+              import os, sys, time
+              from sqlalchemy import create_engine, text
+              url = ("postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+                     .format(**os.environ))
+              engine = create_engine(url)
+              for _ in range(120):
+                  try:
+                      with engine.connect() as c:
+                          v = c.execute(text("SELECT max(version) FROM schema_migrations")).scalar()
+                      if v and v >= "005":
+                          print(f"migraciones en {v}: listo"); sys.exit(0)
+                  except Exception as e:
+                      v = type(e).__name__
+                  print(f"esperando migraciones (actual: {v})", flush=True)
+                  time.sleep(5)
+              sys.exit(1)
+          envFrom: &envFrom
+            - configMapRef:
+                name: geotracker-config
+          env:
+            # Straight to Postgres, not through PgBouncer: a one-off bulk load in a
+            # single long transaction gains nothing from transaction pooling.
+            # (Cloud/CNPG overlay: patch to geotracker-db-rw.)
+            - name: DB_HOST
+              value: "geotracker-db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            # scripts/config.py reads TOMTOM_API_KEY at import time (not used here).
+            - name: TOMTOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: TOMTOM_API_KEY
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+      containers:
+        - name: osm-loader
+          image: geotracker-etl:latest
+          imagePullPolicy: IfNotPresent
+          # Run from /app (WORKDIR) like on the host, so osmnx caches in ./cache.
+          command: ["python", "scripts/osmnx_loader.py"]
+          envFrom: *envFrom
+          env:
+            - name: DB_HOST
+              value: "geotracker-db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: DB_PASSWORD
+            - name: TOMTOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: geotracker-secret
+                  key: TOMTOM_API_KEY
+            # Extract to read. Must cover src/zona.py. Heavier alternative (all of
+            # Mexico, hundreds of MB: raise the emptyDir sizeLimit and memory limit):
+            # https://download.geofabrik.de/north-america/mexico-latest.osm.pbf
+            - name: OSM_PBF_URL
+              value: "https://download.openstreetmap.fr/extracts/north-america/mexico/san_luis_potosi-latest.osm.pbf"
+          volumeMounts:
+            - name: cache-osmnx
+              mountPath: /app/cache
+          resources:
+            # osmnx/geopandas build the whole graph in memory (~67k edges); the
+            # .pbf pass keeps only the highway ways inside the buffered zone.
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1"
+      volumes:
+        # The downloaded .pbf (cache/osm/) only lives for this attempt: a re-run
+        # downloads the current extract again, which is what a refresh wants.
+        - name: cache-osmnx
+          emptyDir:
+            sizeLimit: 256Mi

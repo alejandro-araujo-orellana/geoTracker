@@ -1,0 +1,47 @@
+# ============================================================================
+# platform/kustomization.yaml — geoTracker's pieces of the observability stack
+# ============================================================================
+# The stack itself (Prometheus, Grafana, kube-state-metrics) is installed with
+# Helm from kube-prometheus-stack/ (D31). This kustomization holds what is
+# OURS and is applied together with the app (overlays include it):
+#  - the API ServiceMonitor (needs the chart's CRDs: install the chart first);
+#  - the geoTracker dashboards, one ConfigMap per JSON file, picked up by the
+#    Grafana sidecar (label grafana_dashboard=1) into the "geoTracker" folder.
+# No global `namespace:` here: each object declares its own.
+# ============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - servicemonitor-api.yaml
+
+configMapGenerator:
+  - name: grafana-dashboard-heatmap-trafico
+    namespace: monitoring
+    files:
+      - grafana/dashboards/heatmap-trafico-slp.json
+    options:
+      # Fixed name: with a hash suffix every change would leave the previous
+      # ConfigMap behind (apply does not prune) and Grafana would see the same
+      # dashboard uid twice.
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: geoTracker
+  # Alert rules (D40, D41) and the ntfy contact point + policy (D42), picked up by the Grafana alerts sidecar (label
+  # grafana_alert=1). One ConfigMap, one file per domain; each file is its own
+  # rule group. (Replaced grafana-alertas-etl, deleted by hand: apply does not prune.)
+  - name: grafana-alertas
+    namespace: monitoring
+    files:
+      - grafana/alerts/etl.yaml
+      - grafana/alerts/tomtom.yaml
+      - grafana/alerts/api.yaml
+      - grafana/alerts/bd.yaml
+      - grafana/alerts/notificaciones.yaml
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_alert: "1"
