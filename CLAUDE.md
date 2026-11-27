@@ -15,7 +15,8 @@ Documentation:
 - `docs/ROUTING.md` — design of traffic-aware routing.
 - `docs/DECISIONES.md` — decision log (what and why). **Add an entry for every design
   decision** and cite it in the commit.
-- `docs/KUBERNETES.md` — analysis and plan of the Kubernetes milestone (not implemented yet).
+- `docs/KUBERNETES.md` — Kubernetes milestone: plan, current local deployment (k3d) and operations. The cloud
+  phase (Azure) and CI/CD are not implemented yet.
 
 ## Commands
 

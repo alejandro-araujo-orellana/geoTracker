@@ -219,6 +219,7 @@ optionally, IP restriction and TLS (cert-manager) on the Ingress.
 public redistribution). The token in the application is portable across Ingress controllers (Traefik locally,
 whichever is used on AKS), unlike each controller's authentication annotations.
 **Status:** implemented before phase 2 to test it locally and on Compose — see D26. TLS in the cloud is still missing.
+→ The optional IP restriction is discarded in D49.
 **Where:** `08-ingress.yaml` in commit `8461992`; `docs/KUBERNETES.md` › Phase 2.
 
 ## D24 — ETL in one-cycle mode (`--una-vez`) for the CronJob (2026-11-12)
@@ -678,3 +679,20 @@ exact version (the ones the image in use had).
 **Why:** the `Dockerfile` had two `FROM`s (the second, the database image) and could not be built; the
 image in use came from an earlier version. It had to be rebuilt to add `mapbox-vector-tile`.
 The previous image is kept locally as `geotracker_etl_worker:anterior`.
+
+## D49 — API access in the cloud: token + TLS, rate limit and no public docs (2026-11-27)
+(D45–D48 are reserved by the phase 2 stage A plan.)
+**Decision:** in the cloud the API is reachable from any network with the `X-API-Key` token (D26) over TLS, plus:
+- a **rate limit per client** with a Traefik `rateLimit` middleware on the API Ingress (429 over the limit), with
+  `externalTrafficPolicy: Local` on Traefik's Service so the limit applies to the real client IP;
+- an Ingress that publishes **only `/api`**: `/docs` and `/openapi.json` are reached with `kubectl port-forward`.
+  Locally D32 stays as it is.
+
+Replaces the optional IP restriction of D23.
+**Why:** the phone on mobile data changes IP and the cloud environment lives for hours or days; an IP list would add
+friction for limited extra protection. Neither the API code nor the Ingress manifest limits request rate today, and
+the public schema is of no use to the clients.
+**Discarded:** token + TLS + IP allow-list (list upkeep); private network such as Tailscale (a client on every
+device, an outside service and no practice with public TLS; still possible later).
+**Status:** design only; to be implemented in `overlays/nube` (phase 2, stage C). Rate limit values still open.
+**Where:** `docs/superpowers/specs/2026-11-20-fase2-azure-aks-design.md` §5.3 and §6.

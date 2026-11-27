@@ -299,7 +299,7 @@ geoTracker/
   - [ ] Database on CloudNativePG with an upgraded image (PostgreSQL 17)
   - [ ] Continuous backups (WAL + base backups) to Azure Blob Storage, plus a weekly `pg_dump`
   - [ ] Infrastructure as code with Terraform: persistent storage, Key Vault, registry, ephemeral AKS cluster
-  - [ ] `cloud` Kustomize overlay with TLS, IP allow-listing and secrets from Key Vault
+  - [ ] `cloud` Kustomize overlay with TLS, per-client rate limiting, only `/api` published and secrets from Key Vault
   - [ ] Repeatable restore drill and failover procedure
 - [ ] CI/CD pipeline (Jenkins or GitHub Actions)
 

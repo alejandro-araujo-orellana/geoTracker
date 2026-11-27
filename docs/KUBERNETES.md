@@ -1,5 +1,9 @@
 # Kubernetes — milestone plan and implementation
 
+> **Current status (2026-11-27):** phases 1, 3 (except `postgres_exporter`) and 4 are done on local k3d. Phase 2
+> (Azure) has a draft design and a plan for its first stage in `docs/superpowers/`, with no implementation yet.
+> CI/CD has not been started. The dated notes below are history: each one describes its own date.
+
 > **Update 2026-11-20:** phase 4 done (D43). The Compose history (since 2026-06) is in the cluster,
 > translated to its `osm_id`s and verified against Compose; see "Data migration". Compose retired: database and API
 > stopped and all its services behind profiles (D44). Next: phase 2 (cloud) and the CI/CD decision.
@@ -16,12 +20,13 @@
 > **Update 2026-11-13:** phase 1 applied on k3d (D28, D29): database, PgBouncer, API with token, migrations and
 > OSM network loaded; the ETL runs as a `CronJob` and the Compose one is stopped. Missing: history and Grafana (phase 4).
 >
-> Status: **Phase 1 in implementation** (updated 2026-11-12). The earlier analysis (2026-11-09) is
-> kept below as background. The decisions that were **open** were taken in this session and are
+> **Update 2026-11-12** (superseded: applied on 2026-11-13): phase 1 in implementation. The earlier analysis
+> (2026-11-09) is kept below as background. The decisions that were **open** were taken in this session and are
 > reflected here and in `docs/DECISIONES.md` (D19–D23). The `base` + `overlays/local` manifests already exist:
 > they render with `kubectl kustomize` and pass `kubectl apply -k --dry-run=client --validate=strict` against the
-> k3d cluster (13 objects, 2026-11-12). **Not applied yet.** The `--una-vez` mode already exists (D24); before
-> applying, `geotracker-etl:latest` must be rebuilt and imported into k3d. `overlays/nube` does not exist yet (phase 2).
+> k3d cluster (13 objects, 2026-11-12). Not applied on that date. The `--una-vez` mode already existed (D24);
+> before applying, `geotracker-etl:latest` had to be rebuilt and imported into k3d. `overlays/nube` does not exist
+> yet (phase 2).
 
 ## Goal
 
@@ -106,7 +111,7 @@ These close the questions at the end of the document and are recorded in `DECISI
   in phase 2**. The TimescaleDB 2.10.2 upgrade is evaluated as a phase 2 prerequisite, not "along the way".
 - **Kustomize, not Helm** (question 4): `base` + overlays; simpler to learn and template-free.
 - **Non-public API, restricted access** (question 5): not published in any store. In the cloud, access is
-  limited to own devices by **token** (a header the API validates) and/or IP restriction on the Ingress.
+  limited to own devices by **token** (a header the API validates) over TLS, with no IP restriction (D49).
   This keeps the project on the safe side of D8 (research/development use, no public redistribution).
 - **Additions to the original design** (confirmed against both goals):
   - **PgBouncer as its own Deployment**: avoids exhausting `max_connections` with several API replicas + ETL.
@@ -114,9 +119,9 @@ These close the questions at the end of the document and are recorded in `DECISI
   - **topologySpreadConstraints**: spreads the API replicas across different nodes.
 - **Local cluster: k3d** (question 7): on Docker, no VMs; Terraform/Ansible are reserved for the cloud.
 
-Still **open** for later phases: CI/CD Jenkins vs GitHub Actions (question 6), Terraform details
-and remote `tfstate` (question 8) and the alert channel (question 10). Grafana and Pushgateway (question 9) and the
-alerting engine were decided in D31.
+Still **open** for later phases: CI/CD Jenkins vs GitHub Actions (question 6) and Terraform details
+and remote `tfstate` (question 8; proposed in the phase 2 draft design). Grafana and Pushgateway (question 9) and the
+alerting engine were decided in D31; the alert channel (question 10), ntfy, in D42.
 
 ## Measured baseline (Compose, 2026-11-09)
 
@@ -270,7 +275,7 @@ Remember: TimescaleDB 2.10 does not support `ON CONFLICT` on compressed chunks (
 
 ## Phased plan
 
-### Phase 1 — Base environment on local Kubernetes (in progress)
+### Phase 1 — Base environment on local Kubernetes (done, D28–D29)
 
 **Deliverable:** local k3d cluster + `base` + `overlays/local` manifests running, with:
 
@@ -301,7 +306,9 @@ via `port-forward`. Delete an API pod by hand and watch it recreate itself (self
 - **Secrets via Sealed Secrets or External Secrets**: allows versioning an encrypted copy of the secret that only
   the cluster can decrypt (locally, creating it by command is enough; in the cloud with GitOps, it is not).
 - **Improved Ingress with token**: token validation in the API already exists (D26, `X-API-Key` header);
-  the cloud still lacks TLS (without TLS the token travels in clear text) and, optionally, IP restriction. TLS with cert-manager. This implements the "only my devices" access control (D8).
+  the cloud still lacks TLS (without TLS the token travels in clear text; TLS with cert-manager), a per-client rate
+  limit at Traefik and an Ingress that publishes only `/api` (D49). This implements the "only my devices" access
+  control (D8).
 - **Infrastructure with Terraform** (`deploy/terraform/`): AKS cluster, network, image registry, remote
   backend for the `tfstate` (never in git, never with plain-text secrets).
 - **Prerequisite:** TimescaleDB upgrade as an Ansible playbook (backup → upgrade →
@@ -393,10 +400,10 @@ managing the same thing (each one "fixes" the other's state: *drift*).
 
   | Component | Metrics | How |
   |---|---|---|
-  | ETL | Successful/failed cycle, duration, measured edges, tiles | `kube-state-metrics` (last `CronJob` success, **available**) + `ejecuciones_etl` table in the database (pending) |
+  | ETL | Successful/failed cycle, duration, measured edges, tiles | `kube-state-metrics` (last `CronJob` success, **available**) + `ejecuciones_etl` table in the database (**done, D41**) |
   | TomTom quotas | Monthly usage vs quota, 403 | Already in `consumo_api`: Grafana rule over SQL |
   | API | Latency, errors, requests | **Done (D32, D33):** `/metrics` with `prometheus-fastapi-instrumentator` + `ServiceMonitor` |
-  | Database | Connections, size, locks, chunks/compression | `postgres_exporter` |
+  | Database | Connections, size, locks, chunks/compression | `postgres_exporter` (pending; only the size alert exists, over SQL) |
   | Cluster | Pod CPU/memory, restarts, PVCs | Included in the chart |
 
 - **Initial alerts — all done (D40, D41)** in `platform/grafana/alerts/` (`etl`, `tomtom`, `api`, `bd`.yaml),
@@ -533,4 +540,4 @@ Variables: `CORTE`, `FASE4_DIR` (intermediate files, `/tmp/fase4`), `RESPALDO_DI
 | 7 | Local cluster: k3d or k3s? | **k3d** on Docker |
 | 8 | Terraform: which one and where is the `tfstate`? | Open (phase 2); remote backend in Azure, outside git |
 | 9 | Prometheus: the chart's Grafana? Pushgateway? | **The chart's Grafana, no Pushgateway** (D31) |
-| 10 | Minimum alerts and channel | **Grafana rules; Grafana Alerting locally, Alertmanager in the cloud** (D31). Channel: open |
+| 10 | Minimum alerts and channel | **Grafana rules; Grafana Alerting locally, Alertmanager in the cloud** (D31). Channel: **ntfy push to the phone** (D42) |

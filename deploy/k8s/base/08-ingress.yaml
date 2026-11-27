@@ -11,13 +11,10 @@
 # works out of the box in a local environment.
 #
 # YOUR ANTI-COMMERCIALIZATION CONTROL (per the TomTom/D8 requirements):
-# This is where you restrict access to "only your devices." There are two ways:
-#  - Custom token: an annotation that requires a secret header (shown
-#    conceptually below; the specific implementation depends on the controller).
-#  - IP-based restriction: an annotation that only allows traffic from
-#    specific source IPs.
-# With this, it is no longer an open, public-facing service—keeping you
-# safely within the bounds of the D8 requirements.
+# Access is limited to "only your devices" by the X-API-Key token that the API
+# itself validates (D26), over TLS in the cloud. There is no IP restriction
+# (D49). With this, it is not an open service—keeping you within the bounds of
+# the D8 requirements.
 # ============================================================================
 
 apiVersion: networking.k8s.io/v1
@@ -25,10 +22,9 @@ kind: Ingress
 metadata:
   name: geotracker-api
   namespace: geotracker
-  # annotations: none needed locally. In the cloud overlay, add the ones for TLS
-  # (cert-manager) and, optionally, IP restriction. EXAMPLE (nginx-ingress syntax;
-  # Traefik uses middlewares instead):
-  #   nginx.ingress.kubernetes.io/whitelist-source-range: "YOUR.IP.HERE/32"
+  # annotations: none needed locally. The cloud overlay (phase 2, D49) adds TLS
+  # (cert-manager) and a per-client rate limit (Traefik rateLimit middleware),
+  # and removes the /docs and /openapi.json paths below.
   #
   # Token-based access is NOT done here: the API validates the X-API-Key header
   # itself (D26), which is portable across ingress controllers.

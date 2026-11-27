@@ -1,7 +1,7 @@
 # Phase 2 — geoTracker on Azure/AKS: design
 
 Date: 2026-11-20. Status: draft for approval. Prior context: `docs/KUBERNETES.md` (phased plan,
-decisions D18–D44), `docs/DECISIONES.md`.
+decisions D18–D44), `docs/DECISIONES.md`. Updated 2026-11-27: API access in the cloud (D49).
 
 ## 1. Intent and why
 
@@ -23,7 +23,7 @@ decisions D18–D44), `docs/DECISIONES.md`.
 2. **Continuous backups** (WAL + base backups) of the home database to Azure Blob Storage, plus a **weekly
    `pg_dump`** as an independent logical copy (option C chosen).
 3. **Azure infrastructure as code** with Terraform: a persistent (cheap) part and an ephemeral AKS cluster.
-4. A `nube` Kustomize overlay that deploys the same app as locally, with TLS, token, IP restriction and
+4. A `nube` Kustomize overlay that deploys the same app as locally, with TLS, token, rate limiting and
    secrets from Azure Key Vault.
 5. A repeatable, verified **restore drill**, and a documented **takeover** procedure (moving
    the ETL to the cloud) for the day it is needed.
@@ -245,8 +245,13 @@ sequenceDiagram
 - **External Secrets Operator** reading from Key Vault — my call, instead of Sealed Secrets: with a cluster that
   is destroyed and recreated, the Sealed Secrets key would be lost on every session; Key Vault persists outside the cluster.
 - **Traefik** as Ingress (the same controller as k3d: parity with local) + **cert-manager** with Let's Encrypt
-  (HTTP-01). **Access: token + TLS** (decided by the user), no IP list: the phone on mobile data
-  changes IP. A private network (e.g. Tailscale) is an optional later step.
+  (HTTP-01). **Access: token + TLS, hardened** (decided by the user, D49), no IP list: the phone on mobile data
+  changes IP. A private network (e.g. Tailscale) is an optional later step. Hardening:
+  - **Rate limit per client** with a Traefik `rateLimit` middleware on the API Ingress; over the limit → 429.
+    It needs the real client IP: Traefik's Service uses `externalTrafficPolicy: Local` — my call; with the
+    default (`Cluster`) clients can reach Traefik with a node's address and share one limit.
+  - **Only `/api` is published.** The `nube` overlay removes `/docs` and `/openapi.json` from the Ingress (the
+    local one keeps them, D32); in the cloud they are reached with `kubectl port-forward`.
 - `kube-prometheus-stack` with the same values as locally + cloud adjustments; dashboards and alerts from
   `platform/` unchanged. **Alerts: Grafana Alerting with ntfy, same as locally** — my call that contradicts
   D31 ("Alertmanager in the cloud"): duplicating the rules in two formats does not teach enough for its cost.
@@ -274,8 +279,10 @@ orphaned disks or IPs remain). `persistente/` is never destroyed from these scri
 2. **Restore verifier** (generalizes D43's): compares home vs cloud per day and table (exact counts and sums
    in `numeric`, the sum weighted by `u`) up to the recovery point; same free-flow route;
    equal `schema_migrations` and extension versions.
-3. Cloud tests: real route over HTTPS with token; no token → 401; HTTP without TLS → redirected; delete the
-   database's primary pod → the replica takes over and the API keeps responding (failover); dashboards and alerts loaded.
+3. Cloud tests: real route over HTTPS with token; no token → 401; HTTP without TLS → redirected; `/docs` and
+   `/openapi.json` on the public address → 404; a burst over the rate limit → 429, while a second client (another
+   public IP) still gets through; delete the database's primary pod → the replica takes over and the API keeps
+   responding (failover); dashboards and alerts loaded.
 4. Record times (how long the restore takes) and the session's cost.
 5. `nube-abajo.sh`.
 **Session with restore drill (UML: sequence).**
@@ -304,7 +311,7 @@ sequenceDiagram
     VR->>CA: counts and sums per day (up to the recovery point)
     VR->>K: same queries in the cloud
     VR-->>U: identical / differences
-    U->>K: tests: HTTPS + token, no token → 401, primary failover
+    U->>K: tests: HTTPS + token, no token → 401, /docs → 404, rate limit → 429, primary failover
     U->>SC: nube-abajo.sh
     SC->>TF: terraform destroy (checks orphaned disks and IPs)
 ```
@@ -339,11 +346,14 @@ stateDiagram-v2
 
 - `docs/KUBERNETES.md`: phase 2 rewritten with this design; questions 8 (Terraform/`tfstate`) and 10 (channel) closed.
 - `DECISIONES.md`: one entry per stage decision (image/versions, upgrade, backups, Terraform in two
-  roots, External Secrets, Traefik + DNS label, cloud alerts, drill).
+  roots, External Secrets, Traefik + DNS label, cloud alerts, drill). API access is already recorded (D49);
+  D45–D48 are reserved by the stage A plan.
 - `DATABASE.md`: new engine versions.
 - Runbooks: upgrade, cloud session, restore drill, takeover.
 
 ## 6. Approaches considered
+
+### Backups
 
 | Approach | Pros | Cons |
 |---|---|---|
@@ -355,16 +365,29 @@ stateDiagram-v2
 the home server is a new installation (starting on CNPG costs little) and the weekly dump covers what physical
 backups do not.
 
+### API access in the cloud
+
+| Approach | Pros | Cons |
+|---|---|---|
+| **A. Token + TLS, hardened (chosen)** | Works from any network, including mobile data; exercises public HTTPS | The endpoint is visible to internet scanners |
+| B. A + IP allow-list | A stolen token is useless from other addresses | The list must be updated whenever an address changes; needs the real client IP |
+| C. Private network (Tailscale) | No public endpoint | A client on every device and an outside service; does not exercise public TLS |
+
+**Chosen: A**, by the user (2026-11-27, D49): sessions last hours or days and the phone is one of the clients, so
+an IP list adds friction for limited extra protection.
+
 ## 7. Decided by the user vs my calls
 
 **Decided by the user:** educational purpose + "just in case"; home server as the real system; move the
 live system with its history (backups + restore drill); approach C; CI/CD later; access to the API in
-the cloud by token + TLS (no IP list); Azure for Students subscription.
+the cloud by token + TLS (no IP list), with rate limiting at Traefik and without public `/docs` or
+`/openapi.json`; Azure for Students subscription.
 
 **My calls (reviewable):** PostgreSQL 17; upgrade path via an intermediate TimescaleDB version;
 2 database instances in the cloud and 1 at home; Terraform in two roots; ephemeral per-session ACR (not persistent, because of
 the annual credit); weekly dump also on a home disk; External Secrets + Key
-Vault instead of Sealed Secrets; Traefik + Azure DNS label instead of an own domain; Grafana Alerting in the
+Vault instead of Sealed Secrets; Traefik + Azure DNS label instead of an own domain; rate limit per client with
+`externalTrafficPolicy: Local`; Grafana Alerting in the
 cloud (reverts part of D31); retention periods (14 days WAL/base, 8 weeks dumps); no OSM `Job` in the cloud; Ansible
 out of this phase (moves to the home server project, where it does prepare hosts).
 
@@ -373,5 +396,5 @@ out of this phase (moves to the home server project, where it does prepare hosts
 Exact versions (CNPG image, TimescaleDB, PostGIS, pgRouting, operator, plugin, charts, Terraform/azurerm
 provider); node size and region within the student subscription's policy and quota; path of the
 home disk for the dump copy; image tagging scheme; exact shape of the session scripts
-and the verifier; Azure resource names; backup alert thresholds; how to expose
+and the verifier; Azure resource names; backup alert thresholds; rate limit values (average and burst); how to expose
 Grafana in the cloud (port-forward or behind the same Ingress with authentication).
