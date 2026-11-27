@@ -7,7 +7,7 @@
 #   nube:  values-nube.yaml    (phase 2: Alertmanager on, Grafana sends to it)
 #
 # Install / upgrade (Helm from a container; nothing installed on the host) — see
-# docs/KUBERNETES.md "Observabilidad":
+# docs/KUBERNETES.md "Observability":
 #   helm upgrade --install kps oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
 #     --version 93.3.0 -n monitoring --create-namespace \
 #     -f deploy/k8s/platform/kube-prometheus-stack/values.yaml \

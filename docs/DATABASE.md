@@ -1,42 +1,42 @@
-# Esquema de Base de Datos — geoTracker
+# Database Schema — geoTracker
 
-> **BD vigente: `geotracker-db-0` en el cluster** (misma imagen y migraciones). `trafico_db` (Compose) está retirada
-> desde el 2026-11-20 (D44); su histórico se copió al cluster (D43).
+> **Current database: `geotracker-db-0` in the cluster** (same image and migrations). `trafico_db` (Compose) has been
+> retired since 2026-11-20 (D44); its history was copied to the cluster (D43).
 >
-> Documento levantado **contra la base de datos real** (`trafico_db`, BD `vialidades_slp`) el 2026-11-09
-> y actualizado tras aplicar las migraciones 001–012 y ampliar la red OSM a la zona única el mismo día.
-> Motor: imagen fija `geotracker-timescaledb:pg15.2-ts2.10.2` (D17).
-> El DDL completo vive en `db/migrations/`; si cambias el esquema, agrega una migración y actualiza
-> este archivo en el mismo commit.
+> Document surveyed **against the real database** (`trafico_db`, database `vialidades_slp`) on 2026-11-09
+> and updated after applying migrations 001–012 and expanding the OSM network to the single study area the same day.
+> Engine: pinned image `geotracker-timescaledb:pg15.2-ts2.10.2` (D17).
+> The full DDL lives in `db/migrations/`; if you change the schema, add a migration and update
+> this file in the same commit.
 
-## Motor y extensiones
+## Engine and extensions
 
-Imagen: `geotracker-timescaledb:pg15.2-ts2.10.2` = `timescale/timescaledb-ha` fijada por digest (la `pg15-latest`
-de 2023, PostgreSQL 15.2) + `postgresql-15-pgrouting=4.0.1` (ver `db/Dockerfile`, D17). No usar `pg15-latest`:
-hoy trae una TimescaleDB que no carga estos datos sin actualizar la extensión.
+Image: `geotracker-timescaledb:pg15.2-ts2.10.2` = `timescale/timescaledb-ha` pinned by digest (the 2023
+`pg15-latest`, PostgreSQL 15.2) + `postgresql-15-pgrouting=4.0.1` (see `db/Dockerfile`, D17). Do not use `pg15-latest`:
+today it ships a TimescaleDB that cannot load this data without upgrading the extension.
 
-| Extensión | Versión | Uso |
+| Extension | Version | Use |
 |---|---|---|
-| `postgis` | 3.3.2 | Geometrías (`geometry`), índices GiST, reproyección |
-| `pgrouting` | 4.0.1 | Grafo vial y Dijkstra (`pgr_dijkstra`, `pgr_connectedComponents`) |
-| `timescaledb` | 2.10.2 | Hypertables para series de tiempo |
-| `timescaledb_toolkit` | 1.16.0 | Instalada, sin uso actual |
+| `postgis` | 3.3.2 | Geometries (`geometry`), GiST indexes, reprojection |
+| `pgrouting` | 4.0.1 | Road graph and Dijkstra (`pgr_dijkstra`, `pgr_connectedComponents`) |
+| `timescaledb` | 2.10.2 | Hypertables for time series |
+| `timescaledb_toolkit` | 1.16.0 | Installed, currently unused |
 
-Sistemas de referencia usados:
-- **EPSG:4326** (WGS84, grados): toda geometría "de presentación" (`geom`) — lo que consume Grafana y pgRouting.
-- **EPSG:32614** (UTM 14N, metros): cálculos de distancia (IDW, muestreo). Solo en `dim_calles_osm.centroide_m`.
+Reference systems used:
+- **EPSG:4326** (WGS84, degrees): all "presentation" geometry (`geom`) — what Grafana and pgRouting consume.
+- **EPSG:32614** (UTM 14N, metres): distance calculations (IDW, sampling). Only in `dim_calles_osm.centroide_m`.
 
-## Diagrama lógico (UML: clases)
+## Logical diagram (UML: classes)
 
-Esquema vigente (migraciones 001–015, BD del cluster). Línea continua = FK real; punteada = relación lógica sin
-FK. `«hypertable»` = tabla de TimescaleDB particionada por tiempo. `trafico_inferido` (legado, P10) no aparece:
-no existe en el cluster.
+Current schema (migrations 001–015, cluster database). Solid line = real FK; dashed = logical relation without
+FK. `«hypertable»` = TimescaleDB table partitioned by time. `trafico_inferido` (legacy, P10) is not shown:
+it does not exist in the cluster.
 
 ```mermaid
 classDiagram
     direction LR
     class dim_calles_osm {
-        «dimensión / aristas del grafo»
+        «dimension / graph edges»
         osm_id bigint PK
         id bigint
         u bigint
@@ -54,7 +54,7 @@ classDiagram
         centroide_m Point 32614
     }
     class dim_calles_osm_vertices_pgr {
-        «nodos del grafo»
+        «graph nodes»
         id bigint PK
         x float8
         y float8
@@ -129,226 +129,226 @@ classDiagram
     dim_calles_osm "*" ..> "2" dim_calles_osm_vertices_pgr : source / target
     dim_calles_osm "*" ..> "0..1" dim_velocidad_tipo_via : tipo_via
     fact_lecturas_trafico "*" ..> "1" dim_segmentos_viales : id_segmento
-    resumen_trafico_ciclo ..> trafico_calles : agrega TILE cada 15 min
+    resumen_trafico_ciclo ..> trafico_calles : aggregates TILE every 15 min
 ```
 
-Tamaños y conteos de cada tabla: en su sección abajo.
+Sizes and row counts of each table: in its section below.
 
-## Tablas
+## Tables
 
-### `dim_segmentos_viales` — dimensión de segmentos medidos por TomTom
-| Columna | Tipo | Notas |
+### `dim_segmentos_viales` — dimension of segments measured by TomTom
+| Column | Type | Notes |
 |---|---|---|
-| `id_segmento` | `text` PK | Clave de `data/vialidades_maestras.json` (ej. `Avenida_Universidad_1`) |
-| `nombre_via` | `text` NOT NULL | Hoy es idéntico a `id_segmento` |
-| `coordenadas_geometria` | `jsonb` | Lista `[{latitude, longitude}, ...]` que devuelve TomTom. **Legado**, se mantiene como respaldo |
-| `geom` | `geometry(LineString,4326)` | Geometría PostGIS. Índice GiST `idx_segmentos_geom` |
+| `id_segmento` | `text` PK | Key from `data/vialidades_maestras.json` (e.g. `Avenida_Universidad_1`) |
+| `nombre_via` | `text` NOT NULL | Currently identical to `id_segmento` |
+| `coordenadas_geometria` | `jsonb` | `[{latitude, longitude}, ...]` list returned by TomTom. **Legacy**, kept as a backup |
+| `geom` | `geometry(LineString,4326)` | PostGIS geometry. GiST index `idx_segmentos_geom` |
 
-Estado: 482 filas, **todas con `geom`** (la migración 003 rellenó las 282 que faltaban desde el JSONB).
-`loader.py` escribe `geom` en cada upsert: inserta los segmentos nuevos y completa la geometría de
-los que la tenían en NULL. Una geometría existente no se sobrescribe.
-35 de estos segmentos quedaron fuera de la zona de estudio (P9) y otros 233 eran redundantes (devolvían el
-mismo segmento TomTom que otro punto; `scripts/deduplicar_puntos.py`). Hoy se miden 207; el resto se
-conserva por su histórico en `fact_lecturas_trafico`.
+Status: 482 rows, **all with `geom`** (migration 003 filled in the 282 missing ones from the JSONB).
+`loader.py` writes `geom` on every upsert: it inserts new segments and completes the geometry of
+those that had it NULL. An existing geometry is never overwritten.
+35 of these segments ended up outside the study area (P9) and another 233 were redundant (they returned the
+same TomTom segment as another point; `scripts/deduplicar_puntos.py`). Today 207 are measured; the rest are
+kept for their history in `fact_lecturas_trafico`.
 
-### `fact_lecturas_trafico` — hechos de tráfico (hypertable sobre `timestamp_lectura`)
-| Columna | Tipo | Notas |
+### `fact_lecturas_trafico` — traffic facts (hypertable on `timestamp_lectura`)
+| Column | Type | Notes |
 |---|---|---|
 | `timestamp_lectura` | `timestamptz` NOT NULL | UTC |
-| `id_segmento` | `text` NOT NULL | Referencia lógica a `dim_segmentos_viales` (sin FK) |
+| `id_segmento` | `text` NOT NULL | Logical reference to `dim_segmentos_viales` (no FK) |
 | `velocidad_actual` | `double precision` | `currentSpeed` km/h |
 | `tiempo_recorrido` | `double precision` | `currentTravelTime` s |
-| `nivel_congestion` | `double precision` | `currentTravelTime / freeFlowTravelTime` (1.0 = flujo libre; observado 0–8, media 1.14) |
+| `nivel_congestion` | `double precision` | `currentTravelTime / freeFlowTravelTime` (1.0 = free flow; observed 0–8, mean 1.14) |
 
-Restricción `uq_lectura_por_calle UNIQUE (timestamp_lectura, id_segmento)` → idempotencia.
-Datos: 17 030 filas, 2026-06-10 → 2026-07-01. Chunks de 7 días. Compresión a los 7 días
-(`segmentby id_segmento`, `orderby timestamp_lectura DESC`). **Sin retención**: son los datos crudos y
-la base para costos históricos por hora del día.
+Constraint `uq_lectura_por_calle UNIQUE (timestamp_lectura, id_segmento)` → idempotency.
+Data: 17 030 rows, 2026-06-10 → 2026-07-01. 7-day chunks. Compression after 7 days
+(`segmentby id_segmento`, `orderby timestamp_lectura DESC`). **No retention**: this is the raw data and
+the basis for historical costs by time of day.
 
-### `fact_flujo_aristas` — tráfico medido por arista desde vector tiles (hypertable, migración 010)
-| Columna | Tipo | Notas |
+### `fact_flujo_aristas` — traffic measured per edge from vector tiles (hypertable, migration 010)
+| Column | Type | Notes |
 |---|---|---|
-| `timestamp_lectura` | `timestamptz` NOT NULL | Inicio de la pasada de tiles (UTC, al segundo) |
-| `osm_id` | `bigint` NOT NULL FK → `dim_calles_osm` | Arista dirigida medida |
-| `nivel_relativo` | `double precision` NOT NULL, 0..1 | `traffic_level` de TomTom = velocidad actual / libre. Congestión equivalente = 1 / nivel |
-| `cerrada` | `boolean` NOT NULL | `road_closure` del tile |
+| `timestamp_lectura` | `timestamptz` NOT NULL | Start of the tile pass (UTC, to the second) |
+| `osm_id` | `bigint` NOT NULL FK → `dim_calles_osm` | Measured directed edge |
+| `nivel_relativo` | `double precision` NOT NULL, 0..1 | TomTom's `traffic_level` = current / free speed. Equivalent congestion = 1 / level |
+| `cerrada` | `boolean` NOT NULL | The tile's `road_closure` |
 
-`UNIQUE (timestamp_lectura, osm_id)`; chunks de 1 día; compresión a 7 días (`segmentby osm_id`); **sin
-retención** (datos crudos, D5). La escribe `src/asociador.py` (regla dirigida, D9/D11). Volumen: ~15 000
-filas por pasada (primary/trunk/motorway ~100 %, secondary 98 %, tertiary 84 %, residential 8 %).
-La geometría de los tiles no se guarda.
+`UNIQUE (timestamp_lectura, osm_id)`; 1-day chunks; compression after 7 days (`segmentby osm_id`); **no
+retention** (raw data, D5). Written by `src/asociador.py` (directed rule, D9/D11). Volume: ~15 000
+rows per pass (primary/trunk/motorway ~100 %, secondary 98 %, tertiary 84 %, residential 8 %).
+The tile geometry is not stored.
 
-### `dim_calles_osm` — red vial completa de OSM (aristas del grafo)
-| Columna | Tipo | Notas |
+### `dim_calles_osm` — full OSM road network (graph edges)
+| Column | Type | Notes |
 |---|---|---|
-| `osm_id` | `bigint` PK | ID estable: `blake2b("u_v_k")` (63 bits). En el cluster lo es para toda la red. En la BD de Compose, las 24 574 filas cargadas antes del 2026-11-09 conservan su ID original; al traer ese histórico al cluster se tradujo por `(u,v,k)` (D43) |
-| `u`, `v`, `k` | `bigint`, `bigint`, `integer` | **Clave natural** (único `uq_calles_osm_uvk`): nodo OSM inicial, nodo OSM final, índice de arista paralela |
-| `id` | `bigint` NOT NULL, serial | ID de arista para pgRouting |
-| `nombre` | `text` | NULL si no tiene nombre. Si OSM tiene varios, se guarda el primero en orden alfabético |
-| `tipo_via` | `text` NOT NULL | `highway` de OSM. Si la arista fusiona varios tipos, se guarda el de mayor jerarquía |
-| `longitud_m` | `double precision` | Longitud en metros (osmnx) |
-| `maxspeed_kmh` | `double precision` | Límite de OSM en km/h (escaso: ~1 500 aristas) |
-| `oneway` | `boolean` | Sentido único según OSM |
-| `activo` | `boolean` NOT NULL default TRUE | FALSE si la arista ya no existe en la última descarga de OSM. No se borra porque `trafico_calles` la referencia |
-| `geom` | `geometry(LineString,4326)` | **El sentido de la línea es el sentido de circulación** |
-| `centroide_m` | `geometry(Point,32614)` | Precalculado para el IDW |
-| `source`, `target` | `bigint` | = `u`, `v` (IDs de nodo OSM) → `dim_calles_osm_vertices_pgr.id`. NULL si `activo = FALSE` |
+| `osm_id` | `bigint` PK | Stable ID: `blake2b("u_v_k")` (63 bits). In the cluster this holds for the whole network. In the Compose database, the 24 574 rows loaded before 2026-11-09 keep their original ID; when that history was brought into the cluster it was translated by `(u,v,k)` (D43) |
+| `u`, `v`, `k` | `bigint`, `bigint`, `integer` | **Natural key** (unique `uq_calles_osm_uvk`): start OSM node, end OSM node, parallel edge index |
+| `id` | `bigint` NOT NULL, serial | Edge ID for pgRouting |
+| `nombre` | `text` | NULL if unnamed. If OSM has several, the first in alphabetical order is stored |
+| `tipo_via` | `text` NOT NULL | OSM `highway`. If the edge merges several types, the highest-ranked one is stored |
+| `longitud_m` | `double precision` | Length in metres (osmnx) |
+| `maxspeed_kmh` | `double precision` | OSM limit in km/h (sparse: ~1 500 edges) |
+| `oneway` | `boolean` | One-way according to OSM |
+| `activo` | `boolean` NOT NULL default TRUE | FALSE if the edge no longer exists in the latest OSM download. Not deleted because `trafico_calles` references it |
+| `geom` | `geometry(LineString,4326)` | **The line's direction is the direction of travel** |
+| `centroide_m` | `geometry(Point,32614)` | Precomputed for IDW |
+| `source`, `target` | `bigint` | = `u`, `v` (OSM node IDs) → `dim_calles_osm_vertices_pgr.id`. NULL if `activo = FALSE` |
 
-Índices: GiST en `geom` y `centroide_m`; btree en `tipo_via`, `source`, `target`, `activo`; único en `(u, v, k)`.
+Indexes: GiST on `geom` and `centroide_m`; btree on `tipo_via`, `source`, `target`, `activo`; unique on `(u, v, k)`.
 
-Datos: 67 464 aristas activas (54 588 residential) en la zona única de `src/zona.py`, 28 008 vértices,
-**1 único componente conexo**. Hasta el 2026-11-09 la red cubría solo el centro (24 574 aristas); al
-ampliarla, esas aristas conservaron su `osm_id` y se agregaron 42 890.
+Data: 67 464 active edges (54 588 residential) in the single area of `src/zona.py`, 28 008 vertices,
+**1 single connected component**. Until 2026-11-09 the network only covered the centre (24 574 edges); when it
+was expanded, those edges kept their `osm_id` and 42 890 were added.
 
-Carga: `scripts/osmnx_loader.py` hace todo en una transacción: staging → adopción de filas antiguas por
-geometría → upsert por `(u, v, k)` → desactivación de aristas desaparecidas → sincronización de vértices
-→ validación (aristas sin vértice = 0; componentes conexos). Es idempotente; verificado con tres
-`PYTHONHASHSEED` distintos.
+Loading: `scripts/osmnx_loader.py` does everything in one transaction: staging → adoption of old rows by
+geometry → upsert by `(u, v, k)` → deactivation of vanished edges → vertex synchronization
+→ validation (edges without vertex = 0; connected components). It is idempotent; verified with three
+different `PYTHONHASHSEED` values.
 
-**Direccionalidad:** proviene de un grafo dirigido de osmnx (`network_type="drive"`). Una calle de
-doble sentido aparece como **dos aristas** con geometría invertida (en la red original, 17 491 de
-24 574 aristas tenían par inverso);
-una calle de un solo sentido aparece como **una** arista. Por tanto, para Dijkstra se debe usar
-`directed => true` y `reverse_cost = -1`. Usar `reverse_cost = cost` permitiría circular en contrasentido.
+**Directionality:** it comes from a directed osmnx graph (`network_type="drive"`). A two-way street
+appears as **two edges** with reversed geometry (in the original network, 17 491 of
+24 574 edges had a reverse pair);
+a one-way street appears as **one** edge. Therefore Dijkstra must use
+`directed => true` and `reverse_cost = -1`. Using `reverse_cost = cost` would allow driving against traffic.
 
-### `dim_calles_osm_vertices_pgr` — nodos del grafo (intersecciones)
-| Columna | Tipo |
+### `dim_calles_osm_vertices_pgr` — graph nodes (intersections)
+| Column | Type |
 |---|---|
-| `id` | `bigint` PK — ID de nodo OSM |
+| `id` | `bigint` PK — OSM node ID |
 | `x`, `y` | `double precision` (lon/lat) |
-| `geom` | `geometry(Point,4326)`, índice GiST `idx_vertices_geom` |
+| `geom` | `geometry(Point,4326)`, GiST index `idx_vertices_geom` |
 
-La mantiene `osmnx_loader.py` a partir de los nodos de osmnx: solo contiene nodos usados por aristas
-activas. El nodo más cercano a una coordenada se obtiene con `ORDER BY geom <-> punto LIMIT 1`, que
-usa el índice GiST. Las columnas `in_edges`/`out_edges` de `pgr_extractVertices` se eliminaron
-(migración 005): se derivan de `dim_calles_osm`.
+Maintained by `osmnx_loader.py` from the osmnx nodes: it only contains nodes used by active
+edges. The nearest node to a coordinate is obtained with `ORDER BY geom <-> point LIMIT 1`, which
+uses the GiST index. The `in_edges`/`out_edges` columns of `pgr_extractVertices` were removed
+(migration 005): they are derived from `dim_calles_osm`.
 
-### `consumo_api` — consumo de APIs externas (migración 009)
-| Columna | Tipo | Notas |
+### `consumo_api` — external API usage (migration 009)
+| Column | Type | Notes |
 |---|---|---|
-| `fecha` | `date` | Día en hora local de SLP (PK con `api`) |
-| `api` | `text` | `tomtom_flow_segment` (fuente secundaria) o `tomtom_flow_vector_tiles` (fuente principal) |
-| `peticiones` | `integer` | Cada intento HTTP, incluidos reintentos |
-| `bloqueado` | `boolean` | Se recibió un 403 ese día: no se vuelve a llamar hasta el siguiente |
+| `fecha` | `date` | Day in SLP local time (PK with `api`) |
+| `api` | `text` | `tomtom_flow_segment` (secondary source) or `tomtom_flow_vector_tiles` (main source) |
+| `peticiones` | `integer` | Every HTTP attempt, retries included |
+| `bloqueado` | `boolean` | A 403 was received that day: no more calls until the next one |
 
-La escribe y la lee `src/presupuesto.py` para no exceder la cuota mensual (ver `docs/ROUTING.md` › Fuentes de tráfico).
+Written and read by `src/presupuesto.py` so as not to exceed the monthly quota (see `docs/ROUTING.md` › Traffic sources).
 
-### Ruteo (migración 011)
-- `dim_velocidad_tipo_via (tipo_via PK, velocidad_kmh)` — velocidad libre por tipo de vía (12 tipos).
-- Vista `v_tiempo_libre (osm_id, id, segundos_libre)` — tiempo a flujo libre de cada arista (migración 012).
-- Vista `v_costos_grafo (id, source, target, cost, reverse_cost)` — `segundos_libre × congestión` del último
-  ciclo; excluye aristas inactivas, auto-lazos y cerradas.
-- Función `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` — ver `ROUTING.md`.
+### Routing (migration 011)
+- `dim_velocidad_tipo_via (tipo_via PK, velocidad_kmh)` — free-flow speed per road type (12 types).
+- View `v_tiempo_libre (osm_id, id, segundos_libre)` — free-flow time of each edge (migration 012).
+- View `v_costos_grafo (id, source, target, cost, reverse_cost)` — `segundos_libre × congestion` from the latest
+  cycle; excludes inactive edges, self-loops and closed ones.
+- Function `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` — see `ROUTING.md`.
 
-### `schema_migrations` — control de migraciones
-`version` (PK, `'001'`…), `nombre`, `aplicada_en`. La escribe `src/migrate.py`.
+### `schema_migrations` — migration control
+`version` (PK, `'001'`…), `nombre`, `aplicada_en`. Written by `src/migrate.py`.
 
-### `trafico_calles` — congestión inferida por calle OSM (hypertable sobre `timestamp_calculo`)
-| Columna | Tipo | Notas |
+### `trafico_calles` — congestion inferred per OSM street (hypertable on `timestamp_calculo`)
+| Column | Type | Notes |
 |---|---|---|
-| `id` | `bigint` serial | Sin PK |
-| `timestamp_calculo` | `timestamptz` NOT NULL | **Estado del tráfico inferido**: la lectura TomTom más reciente usada (`max(timestamp_lectura)`). Hasta el 2026-07-01 era la hora de cálculo |
+| `id` | `bigint` serial | No PK |
+| `timestamp_calculo` | `timestamptz` NOT NULL | **State of the inferred traffic**: the most recent TomTom reading used (`max(timestamp_lectura)`). Until 2026-07-01 it was the computation time |
 | `osm_id` | `bigint` NOT NULL FK → `dim_calles_osm(osm_id)` | |
-| `nivel_congestion_inf` | `double precision` NOT NULL | Tiempo actual / tiempo libre. v3: [1, 10]; v2 (IDW_OSM): [1, 3] |
-| `metodo_inferencia` | `text` default `'IDW_OSM'` | `TILE` = medida directa (vector tiles); `IDW_TILE` = inferida desde aristas medidas; `IDW_OSM` = v2 desde Segment Data (respaldo) |
+| `nivel_congestion_inf` | `double precision` NOT NULL | Current time / free time. v3: [1, 10]; v2 (IDW_OSM): [1, 3] |
+| `metodo_inferencia` | `text` default `'IDW_OSM'` | `TILE` = direct measurement (vector tiles); `IDW_TILE` = inferred from measured edges; `IDW_OSM` = v2 from Segment Data (fallback) |
 
-Restricción `uq_trafico_calles_ciclo UNIQUE (timestamp_calculo, osm_id)` (migración 006). `predictor.py`
-no recalcula si ese estado del tráfico ya existe, e inserta con `ON CONFLICT ... DO NOTHING`. Re-ejecutarlo
-sobre los mismos datos no duplica filas (verificado en una copia de la BD).
+Constraint `uq_trafico_calles_ciclo UNIQUE (timestamp_calculo, osm_id)` (migration 006). `predictor.py`
+does not recompute if that traffic state already exists, and inserts with `ON CONFLICT ... DO NOTHING`. Re-running it
+on the same data does not duplicate rows (verified on a copy of the database).
 
-Índices: `trafico_calles_timestamp_calculo_idx` (btree `timestamp_calculo DESC`, el que crea TimescaleDB
-por defecto) y el único `uq_trafico_calles_ciclo`.
+Indexes: `trafico_calles_timestamp_calculo_idx` (btree `timestamp_calculo DESC`, the one TimescaleDB creates
+by default) and the unique `uq_trafico_calles_ciclo`.
 
-Volumen y ciclo de vida (migración 008): con la red ampliada son ~67 k filas por ciclo (~6.5 M/día con
-ciclos cada 15 min). Chunks de **1 día** (los anteriores al cambio son de 7), **compresión** a los 7 días
-(`segmentby osm_id`, `orderby timestamp_calculo DESC`; en la copia de prueba 45 MB → 31 MB) y
-**retención de 365 días**. Como TimescaleDB 2.10 no admite `ON CONFLICT` en chunks comprimidos,
-`predictor.py` no infiere si la lectura más reciente tiene más de 7 días (`ANTIGUEDAD_MAXIMA`).
+Volume and lifecycle (migration 008): with the expanded network there are ~67 k rows per cycle (~6.5 M/day with
+cycles every 15 min). **1-day** chunks (those before the change are 7-day), **compression** after 7 days
+(`segmentby osm_id`, `orderby timestamp_calculo DESC`; on the test copy 45 MB → 31 MB) and
+**365-day retention**. Since TimescaleDB 2.10 does not support `ON CONFLICT` on compressed chunks,
+`predictor.py` does not infer if the most recent reading is older than 7 days (`ANTIGUEDAD_MAXIMA`).
 
-Origen de cada ciclo (D13): v3 usa la última pasada de `fact_flujo_aristas` de los últimos 30 min y su
-`timestamp_lectura` como `timestamp_calculo` (~15 k filas `TILE` + ~52 k `IDW_TILE`). Si no hay pasada
-reciente, v2 usa Segment Data de las últimas 6 h (`VENTANA_LECTURAS`) con `IDW_OSM`.
+Source of each cycle (D13): v3 uses the latest `fact_flujo_aristas` pass from the last 30 min and its
+`timestamp_lectura` as `timestamp_calculo` (~15 k `TILE` rows + ~52 k `IDW_TILE`). If there is no recent
+pass, v2 uses Segment Data from the last 6 h (`VENTANA_LECTURAS`) with `IDW_OSM`.
 
-Datos: 442 332 filas en 18 ciclos (2026-06-17 → 2026-07-01).
+Data: 442 332 rows in 18 cycles (2026-06-17 → 2026-07-01).
 
-### `resumen_trafico_ciclo` — resumen por ciclo de las aristas medidas (continuous aggregate, migración 014)
-Sobre `trafico_calles` con `metodo_inferencia = 'TILE'`, en buckets de 15 min (`ciclo`): `aristas_medidas`,
-`congestion_promedio`, `aristas_congestionadas` (≥ 1.3, incluye cerradas) y `aristas_cerradas` (≥ 9.99). Alimenta
-el panel 1 del dashboard (D38). `materialized_only = false`: el ciclo aún sin materializar se calcula en vivo.
-Política de refresco cada 15 min sobre los últimos 7 días (= `compress_after`); un histórico más antiguo
-restaurado se refresca a mano, **fuera de transacción**:
+### `resumen_trafico_ciclo` — per-cycle summary of measured edges (continuous aggregate, migration 014)
+Over `trafico_calles` with `metodo_inferencia = 'TILE'`, in 15-minute buckets (`ciclo`): `aristas_medidas`,
+`congestion_promedio`, `aristas_congestionadas` (≥ 1.3, closed ones included) and `aristas_cerradas` (≥ 9.99). Feeds
+panel 1 of the dashboard (D38). `materialized_only = false`: the not-yet-materialized cycle is computed live.
+Refresh policy every 15 min over the last 7 days (= `compress_after`); an older restored history
+is refreshed by hand, **outside a transaction**:
 `CALL refresh_continuous_aggregate('resumen_trafico_ciclo', NULL, now() - INTERVAL '7 days');`
-Costo: 90 ciclos en ~30 ms (agregando `trafico_calles` directo: ~8 s).
+Cost: 90 cycles in ~30 ms (aggregating `trafico_calles` directly: ~8 s).
 
-### `ejecuciones_etl` — una fila por ciclo del ETL (migración 015)
-| Columna | Tipo | Notas |
+### `ejecuciones_etl` — one row per ETL cycle (migration 015)
+| Column | Type | Notes |
 |---|---|---|
-| `inicio` | `timestamptz` PK | Inicio del ciclo (UTC); idempotencia (`ON CONFLICT DO NOTHING`) |
-| `fin`, `duracion_s` | `timestamptz`, `double precision` | `duracion_s` generada (`fin − inicio`) |
-| `estado` | `text` CHECK | `ok` (midió y corrió el predictor), `sin_datos` (ninguna fuente trajo datos), `error` (excepción; el Job sale con 1) |
-| `aristas_medidas` | `integer` | Aristas asociadas desde tiles (0 si la pasada falló o no hubo cupo) |
-| `tiles_peticiones`, `tiles_bloqueado` | `integer`, `boolean` | Consumo de la pasada y si hubo 403 |
+| `inicio` | `timestamptz` PK | Cycle start (UTC); idempotency (`ON CONFLICT DO NOTHING`) |
+| `fin`, `duracion_s` | `timestamptz`, `double precision` | `duracion_s` generated (`fin − inicio`) |
+| `estado` | `text` CHECK | `ok` (measured and ran the predictor), `sin_datos` (no source returned data), `error` (exception; the Job exits with 1) |
+| `aristas_medidas` | `integer` | Edges matched from tiles (0 if the pass failed or there was no allowance) |
+| `tiles_peticiones`, `tiles_bloqueado` | `integer`, `boolean` | Usage of the pass and whether there was a 403 |
 | `sd_peticiones`, `sd_bloqueado`, `sd_cargado` | `integer`, `boolean`, `boolean` | Segment Data |
-| `predictor` | `boolean` | Si corrió el predictor |
-| `error` | `text` | Excepciones, incluidas las absorbidas (fallo de tiles con Segment Data de respaldo); máx. 2000 caracteres |
-| `pod` | `text` | `HOSTNAME` del pod → `kubectl logs` |
+| `predictor` | `boolean` | Whether the predictor ran |
+| `error` | `text` | Exceptions, including absorbed ones (tile failure with Segment Data as fallback); max. 2000 characters |
+| `pod` | `text` | Pod `HOSTNAME` → `kubectl logs` |
 
-La escribe `src/ejecuciones.py` desde `main.ciclo_etl`, también si el ciclo falla; si guardarla falla, el ciclo
-sigue. Tabla normal (~96 filas/día). La leen el panel "ETL: últimos ciclos" y la alerta "ETL sin datos de tiles" (D41).
+Written by `src/ejecuciones.py` from `main.ciclo_etl`, even if the cycle fails; if saving it fails, the cycle
+carries on. Regular table (~96 rows/day). Read by the "ETL: últimos ciclos" panel and the "ETL sin datos de tiles" alert (D41).
 
-### `trafico_inferido` — **LEGADO** (IDW v1 sobre grilla de puntos)
+### `trafico_inferido` — **LEGACY** (IDW v1 over a point grid)
 `id`, `timestamp_calculo`, `segmento_origen_id` (FK → `dim_segmentos_viales`), `nivel_congestion_inf`,
 `distancia_metros`, `metodo_inferencia` (`IDW_GRID`), `lat`, `lon`.
-152 834 filas, último dato 2026-06-17. No es hypertable. Ya no se escribe. **Retirada (P10, D44):** solo existe en
-la BD de Compose, apagada; no se copió al cluster (D43) y el dashboard versionado (D33) lee `trafico_calles`. Se
-conserva en el volumen `geotracker_datos_postgres` mientras ese volumen exista.
+152 834 rows, last data 2026-06-17. Not a hypertable. No longer written. **Retired (P10, D44):** it only exists in
+the Compose database, which is stopped; it was not copied to the cluster (D43) and the versioned dashboard (D33) reads `trafico_calles`. It
+is kept in the `geotracker_datos_postgres` volume for as long as that volume exists.
 
-## Migraciones (`db/migrations/`)
+## Migrations (`db/migrations/`)
 
-`src/migrate.py` las aplica en orden, cada una en su propia transacción, y las registra en
-`schema_migrations`. `main.py` lo invoca al arrancar. Todas son idempotentes: se verificaron sobre la
-BD existente y sobre una BD vacía.
+`src/migrate.py` applies them in order, each in its own transaction, and records them in
+`schema_migrations`. `main.py` calls it on startup. All are idempotent: they were verified on the
+existing database and on an empty one.
 
-| Versión | Contenido |
+| Version | Content |
 |---|---|
-| 001 | Extensiones `timescaledb`, `postgis`, `pgrouting` |
-| 002 | Línea base: las 5 tablas del sistema, índices y hypertables (lo que antes era SQL manual) |
-| 003 | (P2) Backfill de `dim_segmentos_viales.geom` desde el JSONB |
-| 004 | (P3/P4) `u, v, k, maxspeed_kmh, oneway, activo` + único `(u, v, k)`; limpia `nombre = 'NaN'` |
-| 005 | (P5) PK e índice GiST en vértices; tipa `geom` como `Point,4326`; quita `in_edges/out_edges` |
-| 006 | (P6) `UNIQUE (timestamp_calculo, osm_id)` en `trafico_calles` |
-| 007 | (P7) Elimina el índice duplicado `idx_trafico_calles_tiempo` |
-| 008 | (P8) Compresión a 7 días en ambas hypertables; retención de 365 días en `trafico_calles`; chunks diarios en `trafico_calles` |
-| 009 | Tabla `consumo_api` (pool de peticiones a TomTom) |
-| 010 | Hypertable `fact_flujo_aristas` (tráfico por arista desde vector tiles) |
-| 011 | Ruteo: `dim_velocidad_tipo_via`, vista `v_costos_grafo`, función `ruta_mas_rapida()` (ver `ROUTING.md`) |
-| 012 | Vista `v_tiempo_libre` (segundos a flujo libre por arista); `v_costos_grafo` pasa a usarla (D16) |
-| 013 | Rol `grafana_ro` (solo lectura) para Grafana: `SELECT` en `public` + privilegios por defecto para tablas futuras, `statement_timeout = 30s`, máximo 10 conexiones. Se crea `NOLOGIN`; `migrate.py` le asigna contraseña y login si recibe `GRAFANA_DB_PASSWORD` (D33) |
-| 014 | Continuous aggregate `resumen_trafico_ciclo` (aristas medidas por ciclo) + política de refresco de 7 días. Se crea `WITH NO DATA` para poder ir en la transacción de `migrate.py` (D38) |
-| 015 | Tabla `ejecuciones_etl`: una fila por ciclo del ETL (estado, aristas, peticiones, error, pod) (D41) |
+| 001 | Extensions `timescaledb`, `postgis`, `pgrouting` |
+| 002 | Baseline: the system's 5 tables, indexes and hypertables (what used to be manual SQL) |
+| 003 | (P2) Backfill of `dim_segmentos_viales.geom` from the JSONB |
+| 004 | (P3/P4) `u, v, k, maxspeed_kmh, oneway, activo` + unique `(u, v, k)`; cleans `nombre = 'NaN'` |
+| 005 | (P5) PK and GiST index on vertices; types `geom` as `Point,4326`; drops `in_edges/out_edges` |
+| 006 | (P6) `UNIQUE (timestamp_calculo, osm_id)` on `trafico_calles` |
+| 007 | (P7) Drops the duplicate index `idx_trafico_calles_tiempo` |
+| 008 | (P8) Compression after 7 days on both hypertables; 365-day retention on `trafico_calles`; daily chunks on `trafico_calles` |
+| 009 | Table `consumo_api` (TomTom request pool) |
+| 010 | Hypertable `fact_flujo_aristas` (traffic per edge from vector tiles) |
+| 011 | Routing: `dim_velocidad_tipo_via`, view `v_costos_grafo`, function `ruta_mas_rapida()` (see `ROUTING.md`) |
+| 012 | View `v_tiempo_libre` (free-flow seconds per edge); `v_costos_grafo` now uses it (D16) |
+| 013 | Role `grafana_ro` (read-only) for Grafana: `SELECT` on `public` + default privileges for future tables, `statement_timeout = 30s`, at most 10 connections. Created `NOLOGIN`; `migrate.py` assigns it a password and login if it receives `GRAFANA_DB_PASSWORD` (D33) |
+| 014 | Continuous aggregate `resumen_trafico_ciclo` (measured edges per cycle) + 7-day refresh policy. Created `WITH NO DATA` so it can run inside `migrate.py`'s transaction (D38) |
+| 015 | Table `ejecuciones_etl`: one row per ETL cycle (status, edges, requests, error, pod) (D41) |
 
-`trafico_inferido` (legado) no está en las migraciones: existe solo en la BD de Compose (no en la del cluster).
+`trafico_inferido` (legacy) is not in the migrations: it only exists in the Compose database (not in the cluster's).
 
 ### Roles
-| Rol | Uso | Permisos |
+| Role | Use | Permissions |
 |---|---|---|
-| `user` | Dueño del esquema: ETL, API, migraciones | Todos |
-| `grafana_ro` | Datasource TimescaleDB de Grafana (D33) | Solo `SELECT` en `public` (incluye tablas creadas después); consultas cortadas a los 30 s |
+| `user` | Schema owner: ETL, API, migrations | All |
+| `grafana_ro` | Grafana's TimescaleDB datasource (D33) | Only `SELECT` on `public` (including tables created later); queries cut off at 30 s |
 
-Los roles son globales al servidor de PostgreSQL, no a la BD.
+Roles are global to the PostgreSQL server, not to the database.
 
-## Problemas conocidos (deuda técnica del esquema)
+## Known issues (schema technical debt)
 
-| # | Problema | Impacto | Acción propuesta |
+| # | Issue | Impact | Proposed action |
 |---|---|---|---|
-| P1 | ✅ **Resuelto** — DDL fuera del repo | — | Migraciones 001–005 + `src/migrate.py` |
-| P2 | ✅ **Resuelto** — `loader.py` no escribía `geom` | — | Migración 003 + `transformer.coordenadas_a_wkt` + upsert con `ST_GeomFromText` |
-| P3 | ✅ **Resuelto** — `osm_id` con `hash()` aleatorio | — | Clave natural `(u, v, k)` + `blake2b` + adopción de filas antiguas (24 574/24 574 conservaron su `osm_id`). También se corrigió la lectura de listas de osmnx, cuyo orden dependía de `PYTHONHASHSEED` |
-| P4 | ✅ **Resuelto** — topología reconstruida a mano, sin `maxspeed` | — | `source/target = u/v`; vértices desde los nodos OSM; `maxspeed_kmh`, `oneway` |
-| P5 | ✅ **Resuelto** — vértices sin PK ni GiST | — | Migración 005; el nodo más cercano usa `Index Scan using idx_vertices_geom` |
-| P6 | ✅ **Resuelto** — `trafico_calles` sin unicidad | — | Migración 006; `timestamp_calculo` = referencia del ciclo; `ON CONFLICT DO NOTHING` + omisión de ciclos ya inferidos |
-| P7 | ✅ **Resuelto** — índice duplicado en `trafico_calles` | — | Migración 007 (~2,9 MB liberados; sin duplicados exactos en toda la BD) |
-| P8 | ✅ **Resuelto** — sin compresión/retención | — | Migración 008; jobs 1000–1002 de TimescaleDB |
-| P9 | ✅ **Resuelto** — tres BBOX distintos (302 de 475 puntos TomTom fuera de la red OSM) | — | Zona única en `src/zona.py` (la amplia, incluye Soledad); red OSM ampliada a 67 464 aristas; 35 puntos TomTom que estaban fuera de toda la zona eliminados (475 → 440) y filtro en `generador_topologia.py` |
-| P10 | ✅ `trafico_inferido` obsoleta | Ruido en el esquema | **Resuelto (D44):** no existe en el cluster ni se copió (D43); el Grafana (D35) y la BD de Compose (D44) que la contenían están retirados. Solo queda en el volumen de Compose conservado |
-| P11 | ✅ **Resuelto en el ruteo** — auto-lazos (`source = target`) en `dim_calles_osm` (29 en la red original); `v_costos_grafo` los excluye. Siguen en la tabla (inofensivos) | — | Migración 011 |
+| P1 | ✅ **Resolved** — DDL outside the repo | — | Migrations 001–005 + `src/migrate.py` |
+| P2 | ✅ **Resolved** — `loader.py` did not write `geom` | — | Migration 003 + `transformer.coordenadas_a_wkt` + upsert with `ST_GeomFromText` |
+| P3 | ✅ **Resolved** — `osm_id` with random `hash()` | — | Natural key `(u, v, k)` + `blake2b` + adoption of old rows (24 574/24 574 kept their `osm_id`). Reading osmnx lists, whose order depended on `PYTHONHASHSEED`, was also fixed |
+| P4 | ✅ **Resolved** — topology rebuilt by hand, without `maxspeed` | — | `source/target = u/v`; vertices from OSM nodes; `maxspeed_kmh`, `oneway` |
+| P5 | ✅ **Resolved** — vertices without PK or GiST | — | Migration 005; the nearest node uses `Index Scan using idx_vertices_geom` |
+| P6 | ✅ **Resolved** — `trafico_calles` without uniqueness | — | Migration 006; `timestamp_calculo` = cycle reference; `ON CONFLICT DO NOTHING` + skipping already inferred cycles |
+| P7 | ✅ **Resolved** — duplicate index on `trafico_calles` | — | Migration 007 (~2.9 MB freed; no exact duplicates in the whole database) |
+| P8 | ✅ **Resolved** — no compression/retention | — | Migration 008; TimescaleDB jobs 1000–1002 |
+| P9 | ✅ **Resolved** — three different BBOXes (302 of 475 TomTom points outside the OSM network) | — | Single area in `src/zona.py` (the wide one, includes Soledad); OSM network expanded to 67 464 edges; 35 TomTom points that were outside the whole area removed (475 → 440) and a filter in `generador_topologia.py` |
+| P10 | ✅ `trafico_inferido` obsolete | Noise in the schema | **Resolved (D44):** it does not exist in the cluster and was not copied (D43); the Grafana (D35) and the Compose database (D44) that held it are retired. It only remains in the preserved Compose volume |
+| P11 | ✅ **Resolved in routing** — self-loops (`source = target`) in `dim_calles_osm` (29 in the original network); `v_costos_grafo` excludes them. They remain in the table (harmless) | — | Migration 011 |

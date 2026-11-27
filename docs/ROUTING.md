@@ -1,120 +1,120 @@
-# Diseño: Ruteo con tráfico real (Dijkstra sobre pgRouting)
+# Design: Routing with real traffic (Dijkstra on pgRouting)
 
-> Estado (2026-11-09): **ruteo con tráfico implementado en la BD** (migración 011, D14):
-> `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)`. Prueba real Centro Histórico → Zona
-> Universitaria UASLP con el tráfico de las 21:21 UTC (15:21 local): 79 aristas, 5.03 km, **10.4 min**;
-> la misma ruta a flujo libre serían 7.6 min (~2.8 min perdidos por congestión); 0.59 s de cálculo.
-> Expuesto en la API (D16): `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon[&detalle=true]` → distancia,
-> duración con tráfico y a flujo libre, demora, vigencia del tráfico, calles y GeoJSON. En vivo (19:32 local,
-> hora pico): Centro → UASLP 5.65 km, 8.3 min (7.6 a flujo libre), respuesta en 0.29 s.
-> Falta: validar ETAs con varios días de datos y calibrar velocidades libres.
+> Status (2026-11-09): **traffic-aware routing implemented in the database** (migration 011, D14):
+> `SELECT * FROM ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)`. Real test Historic Centre → UASLP University
+> Zone with the 21:21 UTC traffic (15:21 local): 79 edges, 5.03 km, **10.4 min**;
+> the same route at free flow would take 7.6 min (~2.8 min lost to congestion); 0.59 s to compute.
+> Exposed in the API (D16): `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon[&detalle=true]` → distance,
+> duration with traffic and at free flow, delay, traffic freshness, streets and GeoJSON. Live (19:32 local,
+> rush hour): Centre → UASLP 5.65 km, 8.3 min (7.6 at free flow), response in 0.29 s.
+> Pending: validate ETAs with several days of data and calibrate free-flow speeds.
 
-## Objetivo
+## Goal
 
-Dada la ubicación del usuario y un destino en San Luis Potosí, devolver la **ruta más rápida
-considerando el tráfico presente**, no la más corta. Además del mapa de calor actual
-(`trafico_calles` en Grafana), el sistema podrá responder:
+Given the user's location and a destination in San Luis Potosí, return the **fastest route
+considering current traffic**, not the shortest one. Besides the current heatmap
+(`trafico_calles` in Grafana), the system can answer:
 
-- ¿Cuál es la ruta más rápida de A a B **ahora**?
-- ¿Cuánto tarda (ETA) y cuánta distancia recorre?
-- ¿Cuánto tiempo se pierde por congestión frente al flujo libre?
+- What is the fastest route from A to B **right now**?
+- How long does it take (ETA) and how far is it?
+- How much time is lost to congestion compared with free flow?
 
-## Por qué PostGIS en lugar de JSONB
+## Why PostGIS instead of JSONB
 
-La regla original ("geometría solo en JSONB") se reemplazó porque Dijkstra requiere:
-1. Topología (`source`/`target`), que pgRouting construye a partir de geometrías PostGIS.
-2. Búsquedas espaciales indexadas (nodo más cercano a un punto, `<->` con GiST).
-3. Uniones espaciales entre segmentos TomTom y aristas OSM.
+The original rule ("geometry only in JSONB") was replaced because Dijkstra requires:
+1. Topology (`source`/`target`), which pgRouting builds from PostGIS geometries.
+2. Indexed spatial lookups (nearest node to a point, `<->` with GiST).
+3. Spatial joins between TomTom segments and OSM edges.
 
-JSONB (`dim_segmentos_viales.coordenadas_geometria`) queda solo como copia cruda de la respuesta de TomTom.
+JSONB (`dim_segmentos_viales.coordenadas_geometria`) remains only as a raw copy of TomTom's response.
 
-## Flujo completo
+## End-to-end flow
 
 ```
-TomTom tiles ─▶ fact_flujo_aristas ─┬─▶ predictor v3 ─▶ trafico_calles (congestión por arista OSM)
-                                    └─ cerradas ──────────────┐       │
+TomTom tiles ─▶ fact_flujo_aristas ─┬─▶ predictor v3 ─▶ trafico_calles (congestion per OSM edge)
+                                    └─ closed ────────────────┐       │
                                                               ▼
-                                          v_costos_grafo (costo = tiempo con tráfico)
+                                          v_costos_grafo (cost = travel time with traffic)
                                                               │
-  (lat,lon) origen ──snap──▶ vértice A                         │
-  (lat,lon) destino ─snap──▶ vértice B ──▶ pgr_dijkstra(v_costos_grafo, A, B, directed)
+  (lat,lon) origin ──snap──▶ vertex A                          │
+  (lat,lon) dest. ───snap──▶ vertex B ──▶ pgr_dijkstra(v_costos_grafo, A, B, directed)
                                                               │
                                                               ▼
-                                    ruta: aristas + geometría + ETA + distancia
+                                    route: edges + geometry + ETA + distance
 ```
 
-### Petición de una ruta (UML: secuencia)
+### Route request (UML: sequence)
 
-`GET /api/v1/rutas` de punta a punta (`services/api/app/rutas/`, migraciones 011–012).
+`GET /api/v1/rutas` end to end (`services/api/app/rutas/`, migrations 011–012).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor C as Cliente
+    actor C as Client
     participant I as Ingress (Traefik)
     participant R as router.py
     participant S as servicio.calcular_ruta
     participant PB as PgBouncer
-    participant BD as Base de datos
+    participant BD as Database
 
     C->>I: GET /api/v1/rutas?origen=lat,lon&destino=lat,lon<br/>X-API-Key
-    I->>R: reenvía
-    R->>R: verificar_token() — 401 si falta o no es válido
-    R->>R: Coordenada.desde_texto() — 422 si el formato es inválido
+    I->>R: forwards
+    R->>R: verificar_token() — 401 if missing or invalid
+    R->>R: Coordenada.desde_texto() — 422 if the format is invalid
     R->>S: calcular_ruta(origen, destino)
     S->>PB: _encajar(origen) / _encajar(destino)
-    PB->>BD: vértice más cercano (dim_calles_osm_vertices_pgr, KNN)
-    BD-->>S: nodo + distancia
-    alt distancia > 300 m, o mismo nodo
+    PB->>BD: nearest vertex (dim_calles_osm_vertices_pgr, KNN)
+    BD-->>S: node + distance
+    alt distance > 300 m, or same node
         S-->>C: 422
     end
     S->>BD: ruta_mas_rapida() JOIN v_tiempo_libre
     BD->>BD: pgr_dijkstra(v_costos_grafo, A, B, directed)
-    BD-->>S: aristas en orden (segundos, geom)
-    alt sin aristas
-        S-->>C: 404 (p. ej. solo se llega a contrasentido)
+    BD-->>S: edges in order (seconds, geom)
+    alt no edges
+        S-->>C: 404 (e.g. only reachable against one-way direction)
     end
-    S->>BD: último ciclo de trafico_calles (< 30 min)
-    S->>S: suma duración y flujo libre, calles en orden, une geometría
+    S->>BD: latest trafico_calles cycle (< 30 min)
+    S->>S: sum duration and free flow, streets in order, merge geometry
     S-->>C: 200 Ruta (distancia, duracion_s, demora, trafico.vigente, geometria)
 ```
 
-## Función de costo
+## Cost function
 
-### Costo de una arista (UML: actividad)
+### Cost of an edge (UML: activity)
 
-Lo que hace `v_costos_grafo` (012) con cada arista de `dim_calles_osm` en cada petición.
+What `v_costos_grafo` (012) does with each `dim_calles_osm` edge on every request.
 
 ```mermaid
 flowchart TD
-    A([Arista de dim_calles_osm]) --> B{"¿activo, source ≠ target<br/>y longitud_m > 0?"}
-    B -- no --> X([Fuera del grafo])
-    B -- sí --> C{"¿cerrada en la última pasada<br/>de tiles (< 30 min)?"}
-    C -- sí --> X
-    C -- no --> D{"¿maxspeed_kmh entre 10 y 130?"}
-    D -- sí --> V1[velocidad = maxspeed_kmh]
-    D -- no --> E{"¿hay velocidad para su tipo_via?"}
-    E -- sí --> V2[velocidad = dim_velocidad_tipo_via]
-    E -- no --> V3[velocidad = 20 km/h]
-    V1 & V2 & V3 --> L["segundos_libre = longitud_m / (velocidad / 3.6)<br/>(v_tiempo_libre)"]
-    L --> F{"¿tiene fila en el último ciclo<br/>de trafico_calles (< 30 min)?"}
-    F -- sí --> G["cost = segundos_libre × nivel_congestion_inf"]
+    A([dim_calles_osm edge]) --> B{"activo, source ≠ target<br/>and longitud_m > 0?"}
+    B -- no --> X([Out of the graph])
+    B -- yes --> C{"closed in the latest tile pass<br/>(< 30 min)?"}
+    C -- yes --> X
+    C -- no --> D{"maxspeed_kmh between 10 and 130?"}
+    D -- yes --> V1[speed = maxspeed_kmh]
+    D -- no --> E{"speed defined for its tipo_via?"}
+    E -- yes --> V2[speed = dim_velocidad_tipo_via]
+    E -- no --> V3[speed = 20 km/h]
+    V1 & V2 & V3 --> L["segundos_libre = longitud_m / (speed / 3.6)<br/>(v_tiempo_libre)"]
+    L --> F{"has a row in the latest<br/>trafico_calles cycle (< 30 min)?"}
+    F -- yes --> G["cost = segundos_libre × nivel_congestion_inf"]
     F -- no --> H["cost = segundos_libre × 1.0"]
-    G & H --> R(["reverse_cost = -1 (grafo dirigido)<br/>→ pgr_dijkstra"])
+    G & H --> R(["reverse_cost = -1 (directed graph)<br/>→ pgr_dijkstra"])
 ```
 
-`nivel_congestion` = `currentTravelTime / freeFlowTravelTime`, así que multiplica directamente el
-tiempo en flujo libre:
+`nivel_congestion` = `currentTravelTime / freeFlowTravelTime`, so it directly multiplies the
+free-flow time:
 
 ```
-tiempo_libre_s(arista) = longitud_m / (velocidad_libre_kmh(tipo_via) / 3.6)
-costo_s(arista)        = tiempo_libre_s × congestion_actual(arista)
-congestion_actual      = último nivel_congestion_inf de trafico_calles para ese osm_id,
-                         o 1.0 si no hay dato reciente (> 30 min)
+free_time_s(edge) = longitud_m / (free_speed_kmh(tipo_via) / 3.6)
+cost_s(edge)      = free_time_s × current_congestion(edge)
+current_congestion = latest nivel_congestion_inf in trafico_calles for that osm_id,
+                     or 1.0 if there is no recent data (> 30 min)
 ```
 
-Velocidades libres iniciales por tipo de vía (ajustables; idealmente reemplazar por `maxspeed`
-de OSM o por `freeFlowSpeed` de TomTom cuando la arista esté medida):
+Initial free-flow speeds per road type (adjustable; ideally replaced by OSM's `maxspeed`
+or by TomTom's `freeFlowSpeed` when the edge is measured):
 
 | tipo_via | km/h |
 |---|---|
@@ -126,112 +126,112 @@ de OSM o por `freeFlowSpeed` de TomTom cuando la arista esté medida):
 | unclassified | 30 |
 | residential | 25 |
 
-### Direccionalidad
-El grafo es dirigido: cada calle de doble sentido ya está duplicada con geometría invertida.
-Por lo tanto **`reverse_cost = -1`** y `directed => true`. Ver `DATABASE.md › dim_calles_osm`.
+### Directionality
+The graph is directed: every two-way street is already duplicated with reversed geometry.
+Therefore **`reverse_cost = -1`** and `directed => true`. See `DATABASE.md › dim_calles_osm`.
 
-## Implementación (migración 011)
+## Implementation (migration 011)
 
-Todo vive en `db/migrations/011_ruteo.sql`:
+Everything lives in `db/migrations/011_ruteo.sql`:
 
-| Objeto | Qué hace |
+| Object | What it does |
 |---|---|
-| `dim_velocidad_tipo_via` | Velocidad libre por tipo de vía (tabla de arriba). Ajustable con `UPDATE` |
-| `v_costos_grafo` | `id, source, target, cost (segundos), reverse_cost (-1)` con el tráfico del último ciclo (< 30 min) |
-| `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` | Encaja cada coordenada al nodo más cercano (GiST) y corre `pgr_dijkstra` sobre la vista. Devuelve `seq, osm_id, nombre, tipo_via, longitud_m, segundos, segundos_acumulados, geom` |
+| `dim_velocidad_tipo_via` | Free-flow speed per road type (table above). Adjustable with `UPDATE` |
+| `v_costos_grafo` | `id, source, target, cost (seconds), reverse_cost (-1)` with the latest cycle's traffic (< 30 min) |
+| `ruta_mas_rapida(lat_o, lon_o, lat_d, lon_d)` | Snaps each coordinate to the nearest node (GiST) and runs `pgr_dijkstra` over the view. Returns `seq, osm_id, nombre, tipo_via, longitud_m, segundos, segundos_acumulados, geom` |
 
-Diferencias con el diseño original (D14):
-- **Vías cerradas excluidas** del grafo (última pasada de tiles), no solo encarecidas.
-- **`LEFT JOIN`** a `dim_velocidad_tipo_via` con 20 km/h por defecto: un `tipo_via` no listado (p. ej.
-  `living_street`) ya no hace desaparecer la arista en silencio.
-- **`maxspeed` de OSM solo si está entre 10 y 130 km/h**; si no, la velocidad del tipo de vía.
-- Sin tráfico reciente (> 30 min) la vista usa flujo libre: la ruta sigue siendo válida, sin tráfico.
+Differences from the original design (D14):
+- **Closed roads excluded** from the graph (latest tile pass), not just made more expensive.
+- **`LEFT JOIN`** to `dim_velocidad_tipo_via` with 20 km/h by default: an unlisted `tipo_via` (e.g.
+  `living_street`) no longer makes the edge silently disappear.
+- **OSM `maxspeed` only if between 10 and 130 km/h**; otherwise the road type's speed.
+- Without recent traffic (> 30 min) the view uses free flow: the route is still valid, just without traffic.
 
 ```sql
--- Ejemplo: Centro Histórico → Zona Universitaria UASLP
+-- Example: Historic Centre → UASLP University Zone
 SELECT * FROM ruta_mas_rapida(22.1497, -100.9739, 22.1460, -101.0130);
 ```
 
-Limitaciones del encaje: se usa el **nodo** más cercano (no un punto a mitad de calle); si ese nodo solo es
-alcanzable a contrasentido, la función devuelve vacío. Mejora futura: `pgr_withPoints`.
+Snapping limitations: the nearest **node** is used (not a point halfway along a street); if that node is only
+reachable against a one-way direction, the function returns nothing. Future improvement: `pgr_withPoints`.
 
-Pruebas: `tests/test_ruteo_db.py` (BD temporal con grafo sintético): ruta corta sin tráfico, desvío con
-atasco, vía cerrada excluida, tráfico viejo ignorado, sentido único respetado, `maxspeed` absurdo
-descartado, tipo de vía desconocido conservado.
+Tests: `tests/test_ruteo_db.py` (temporary database with a synthetic graph): short route without traffic, detour
+around a jam, closed road excluded, stale traffic ignored, one-way respected, absurd `maxspeed`
+discarded, unknown road type kept.
 
-## Plan de implementación
+## Implementation plan
 
-1. **Saneamiento previo** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
-2. **Migración de ruteo (011):** ✅ `dim_velocidad_tipo_via`, `v_costos_grafo` y `ruta_mas_rapida()` (2026-11-09).
-3. **API** (`services/api`): ✅ `GET /api/v1/rutas` (D16). El tiempo a flujo libre sale de `v_tiempo_libre` (migración 012), la misma vista que usa `v_costos_grafo`.
-4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` en `services/api` y añadir el servicio a `docker-compose.yml`.
-5. **Validación:** comparar ETA contra TomTom Routing API en una muestra de pares O/D; ajustar velocidades libres.
-6. **Futuro:** A* (`pgr_aStar`) para acelerar; costos predichos por hora del día a partir del histórico en `fact_lecturas_trafico`; penalización de giros.
+1. **Prior clean-up** (`DATABASE.md`): ✅ P1–P9 (2026-11-09).
+2. **Routing migration (011):** ✅ `dim_velocidad_tipo_via`, `v_costos_grafo` and `ruta_mas_rapida()` (2026-11-09).
+3. **API** (`services/api`): ✅ `GET /api/v1/rutas` (D16). The free-flow time comes from `v_tiempo_libre` (migration 012), the same view `v_costos_grafo` uses.
+4. **Endpoint** `GET /api/v1/rutas?origen=lat,lon&destino=lat,lon` in `services/api` and add the service to `docker-compose.yml`.
+5. **Validation:** compare ETAs against the TomTom Routing API on a sample of O/D pairs; adjust free-flow speeds.
+6. **Future:** A* (`pgr_aStar`) for speed; costs predicted by time of day from the history in `fact_lecturas_trafico`; turn penalties.
 
-## Fuentes de tráfico y cuota de TomTom
+## Traffic sources and TomTom quota
 
-Cuotas gratuitas **mensuales** (cuenta actual, 2026-11): Flow Segment Data **20 000**; Traffic Flow vector
-tiles **200 000**. Con 440 puntos cada 15 min el ETL consumía ~42 000 peticiones/día: la cuota del mes se
-agotaba en horas (los HTTP 403 de junio-julio).
+Free **monthly** quotas (current account, 2026-11): Flow Segment Data **20 000**; Traffic Flow vector
+tiles **200 000**. With 440 points every 15 min the ETL used ~42 000 requests/day: the monthly quota
+ran out within hours (the HTTP 403s of June–July).
 
-**B.1 — Deduplicación** (`scripts/deduplicar_puntos.py`): 440 → 207 puntos. Con `zoom=10` TomTom devuelve
-segmentos largos y hasta 12 puntos caían en el mismo.
+**B.1 — Deduplication** (`scripts/deduplicar_puntos.py`): 440 → 207 points. With `zoom=10` TomTom returns
+long segments and up to 12 points fell on the same one.
 
-**B.2 — Pool de peticiones** (`src/presupuesto.py` + tabla `consumo_api`):
-- Presupuesto del día = (cuota × 0.9 − usado antes de hoy) / días restantes del mes (~600–820/día).
-- Cupo del ciclo = presupuesto del día × peso(hora local) / Σ pesos del día: pico 3 (~16 por ciclo),
-  valle 1 (~5), madrugada 0.2 (~1). Lo no gastado se reparte en los días siguientes.
-- Cada intento HTTP cuenta (reintentos incluidos); un 403 bloquea el resto del día.
-- Puntos del ciclo: primero los nunca medidos, luego los de lectura más antigua (rotación).
-- Verificado con un ciclo real: 16/16 peticiones, consumo registrado, inferencia de 67 464 calles.
+**B.2 — Request pool** (`src/presupuesto.py` + table `consumo_api`):
+- Daily budget = (quota × 0.9 − used before today) / days left in the month (~600–820/day).
+- Cycle allowance = daily budget × weight(local hour) / Σ weights of the day: peak 3 (~16 per cycle),
+  off-peak 1 (~5), night 0.2 (~1). Whatever is not spent is spread over the following days.
+- Every HTTP attempt counts (retries included); a 403 blocks the rest of the day.
+- Points per cycle: never-measured ones first, then those with the oldest reading (rotation).
+- Verified with a real cycle: 16/16 requests, usage recorded, inference for 67 464 streets.
 
-Limitación: con ~800 peticiones/día cada punto se renueva cada ~3 h en pico y ~10 h en valle; el
-predictor solo usa lecturas de las últimas 6 h, así que la cobertura en vivo es escasa (en el primer
-ciclo, 75 % de las calles quedó fuera del alcance de una fuente).
+Limitation: with ~800 requests/day each point is refreshed every ~3 h at peak and ~10 h off-peak; the
+predictor only uses readings from the last 6 h, so live coverage is sparse (in the first
+cycle, 75 % of the streets were out of reach of any source).
 
-**A — Prueba de vector tiles** (`scripts/prueba_vector_tiles.py`, 2026-11-09, zoom 14):
+**A — Vector tile test** (`scripts/prueba_vector_tiles.py`, 2026-11-09, zoom 14):
 
-| Métrica | Resultado |
+| Metric | Result |
 |---|---|
-| Tiles por pasada sobre la zona | 49 (zoom 13: 16; zoom 15: 182) |
-| Consumo cada 15 min todo el día | ~4 700/día ≈ 141 000/mes (< 200 000) |
-| Tramos de tráfico por pasada | 5 267, con `traffic_level` = velocidad actual / libre (0–1) y `road_closure` |
-| Aristas OSM cubiertas | 14 698 (22 %; 24 % de los km) |
-| Cobertura motorway / trunk / primary | 98–99 % |
-| Cobertura secondary / tertiary | 95 % / 80 % |
-| Cobertura residential | 8 % (sigue necesitando IDW) |
-| Coincidencia con Flow Segment Data (16 segmentos, ~10 min de diferencia) | diferencia media 0.052, máx 0.211; detectó la congestión de Av. Constitución (0.30 vs 0.32) |
+| Tiles per pass over the area | 49 (zoom 13: 16; zoom 15: 182) |
+| Usage every 15 min all day | ~4 700/day ≈ 141 000/month (< 200 000) |
+| Traffic segments per pass | 5 267, with `traffic_level` = current / free speed (0–1) and `road_closure` |
+| OSM edges covered | 14 698 (22 %; 24 % of the km) |
+| motorway / trunk / primary coverage | 98–99 % |
+| secondary / tertiary coverage | 95 % / 80 % |
+| residential coverage | 8 % (still needs IDW) |
+| Agreement with Flow Segment Data (16 segments, ~10 min apart) | mean difference 0.052, max 0.211; detected the congestion on Av. Constitución (0.30 vs 0.32) |
 
-**Resultado:** los tiles pasan a ser la fuente principal (D8). Pendiente: verificar que los términos de
-TomTom permiten almacenar datos derivados de tiles.
+**Result:** tiles become the main source (D8). Pending: verify that TomTom's terms allow storing data derived
+from tiles.
 
-### Implementación (fuente principal)
+### Implementation (main source)
 
-`main.ciclo_etl` en cada ciclo de 15 min:
-1. **Tiles** (`ciclo_tiles`): pool propio (200 000/mes, todo o nada por pasada, D12) →
-   `extractor_tiles.extraer` (49 tiles asíncronos) → `asociador.asociar_y_guardar` → `fact_flujo_aristas`.
-2. **Segment Data** (`ciclo_segment_data`): fuente secundaria dentro de su pool (B.2).
-3. **Predictor** si alguna fuente trajo datos.
+`main.ciclo_etl` on each 15-minute cycle:
+1. **Tiles** (`ciclo_tiles`): its own pool (200 000/month, all or nothing per pass, D12) →
+   `extractor_tiles.extraer` (49 async tiles) → `asociador.asociar_y_guardar` → `fact_flujo_aristas`.
+2. **Segment Data** (`ciclo_segment_data`): secondary source within its pool (B.2).
+3. **Predictor** if any source brought data.
 
-Asociación **dirigida** (D9): cada línea del tile va a la arista OSM a < 12 m de su punto medio con el
-**mismo rumbo** (< 35° sobre 360°). Validado con una pasada real:
-- Aristas oneway: 8 668 asociadas con la regla dirigida vs 2 880 con los tramos invertidos (la calzada
-  contraria de avenidas con camellón, que la regla dirigida evita).
-- 3 059 pares de doble sentido medidos; en 32 % el nivel difiere por sentido.
-- Cobertura: motorway/trunk/primary ~100 %, secondary 98 %, tertiary 84 %, residential 8 %; 15 037 aristas.
-- Tiempo: pasada de tiles + asociación ≈ 6 s (D11).
+**Directed** matching (D9): each tile line goes to the OSM edge within 12 m of its midpoint with the
+**same bearing** (< 35° over 360°). Validated with a real pass:
+- One-way edges: 8 668 matched with the directed rule vs 2 880 with reversed segments (the opposite
+  carriageway of divided avenues, which the directed rule avoids).
+- 3 059 two-way pairs measured; in 32 % the level differs by direction.
+- Coverage: motorway/trunk/primary ~100 %, secondary 98 %, tertiary 84 %, residential 8 %; 15 037 edges.
+- Time: tile pass + matching ≈ 6 s (D11).
 
-**Predictor v3** (D13): aristas medidas → valor directo (`TILE`); resto → IDW desde las medidas abiertas
-(`IDW_TILE`). En un ciclo real: 15 039 medidas + 52 425 inferidas, solo 1 % de calles sin fuente cercana
-(con Segment Data era 72.5 %). Ciclo completo del ETL: 10.7 s.
+**Predictor v3** (D13): measured edges → direct value (`TILE`); the rest → IDW from the open measurements
+(`IDW_TILE`). In a real cycle: 15 039 measured + 52 425 inferred, only 1 % of streets without a nearby source
+(with Segment Data it was 72.5 %). Full ETL cycle: 10.7 s.
 
-**Implicaciones para el ruteo** (pendiente, migración 011):
-- La vista de costos usa `trafico_calles.nivel_congestion_inf` del último ciclo, como estaba diseñado.
-- Además debe **excluir** las aristas con `fact_flujo_aristas.cerrada` en la última pasada: una vía cerrada
-  no es "lenta", es intransitable (en `trafico_calles` solo aparece con el tope 10).
-- El tope de congestión ahora es 10 (antes 3): los atascos severos pesan lo que realmente cuestan.
+**Implications for routing** (pending, migration 011):
+- The cost view uses `trafico_calles.nivel_congestion_inf` from the latest cycle, as designed.
+- It must also **exclude** edges with `fact_flujo_aristas.cerrada` in the latest pass: a closed road
+  is not "slow", it is impassable (in `trafico_calles` it only appears with the cap of 10).
+- The congestion cap is now 10 (previously 3): severe jams weigh what they really cost.
 
-## Limitaciones conocidas
-- La congestión de calles residenciales es en su mayoría **inferida** (los tiles miden ~8 % de ellas).
-- ~~El IDW recorta la congestión a [1, 3]~~ Resuelto en D13: tope 10 y valores medidos directos.
-- Si el ETL no corre (p. ej. TomTom 403), la vista cae a flujo libre (1.0) y la ruta deja de reflejar el tráfico.
+## Known limitations
+- Congestion on residential streets is mostly **inferred** (tiles measure ~8 % of them).
+- ~~IDW clips congestion to [1, 3]~~ Resolved in D13: cap of 10 and direct measured values.
+- If the ETL does not run (e.g. TomTom 403), the view falls back to free flow (1.0) and the route no longer reflects traffic.

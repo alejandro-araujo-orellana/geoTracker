@@ -2,7 +2,7 @@
 # ServiceMonitor — Prometheus scrapes the API's /metrics (D32)
 # ============================================================================
 # Requires the ServiceMonitor CRD, installed by kube-prometheus-stack: install
-# the chart BEFORE `kubectl apply -k` (docs/KUBERNETES.md, "Observabilidad").
+# the chart BEFORE `kubectl apply -k` (docs/KUBERNETES.md, "Observability").
 # Prometheus reaches /metrics through the Service, inside the cluster; the
 # Ingress does not publish it (D32).
 # ============================================================================

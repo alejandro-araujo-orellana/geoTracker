@@ -1,377 +1,377 @@
-# Fase 2 — geoTracker en Azure/AKS: diseño
+# Phase 2 — geoTracker on Azure/AKS: design
 
-Fecha: 2026-11-20. Estado: borrador para aprobación. Contexto previo: `docs/KUBERNETES.md` (plan por fases,
-decisiones D18–D44), `docs/DECISIONES.md`.
+Date: 2026-11-20. Status: draft for approval. Prior context: `docs/KUBERNETES.md` (phased plan,
+decisions D18–D44), `docs/DECISIONES.md`.
 
-## 1. Intención y por qué
+## 1. Intent and why
 
-- **Para qué es Azure (palabras del usuario):** principalmente educativo, y además el plan "por si acaso": si algún
-  día geoTracker tiene que correr en un entorno externo, el camino ya está construido y probado.
-- **Dónde vive geoTracker de verdad:** en un **segundo equipo en casa** que hará de servidor, administrado de forma
-  remota desde el equipo actual. Ese servidor es un proyecto aparte (ver §4); Azure no lo reemplaza.
-- **Qué significa "por si acaso" para los datos (decidido):** poder **mudar el sistema vivo con su histórico**.
-  Por eso el centro de la fase es: respaldos fuera de casa, en Azure, y un **ensayo de restauración** en la nube que
-  demuestre que se puede levantar geoTracker allá con los datos de casa.
-- **Éxito:** con un comando se crea todo en Azure desde el repo, se restaura el histórico de casa, se verifica que
-  es idéntico (como en D43) y que el sistema funciona (ruta real, failover de la BD, acceso solo con token y TLS), y
-  con otro comando se destruye. El crédito ($100 USD) paga **sesiones** de horas o días, no meses encendido.
+- **What Azure is for (the user's words):** mainly educational, and also the "just in case" plan: if geoTracker
+  ever has to run in an external environment, the path is already built and tested.
+- **Where geoTracker really lives:** on a **second computer at home** that will act as a server, managed
+  remotely from the current computer. That server is a separate project (see §4); Azure does not replace it.
+- **What "just in case" means for the data (decided):** being able to **move the live system with its history**.
+  That is why the core of the phase is: off-site backups, in Azure, and a **restore drill** in the cloud that
+  proves geoTracker can be brought up there with the home data.
+- **Success:** with one command everything is created in Azure from the repo, the home history is restored, it is verified to be
+  identical (as in D43) and the system works (real route, database failover, access only with token and TLS), and
+  with another command it is destroyed. The credit ($100 USD) pays for **sessions** of hours or days, not months switched on.
 
-## 2. Metas, no-metas y anti-metas
+## 2. Goals, non-goals and anti-goals
 
-**Metas**
-1. BD con **CloudNativePG** (CNPG) en todos los entornos, sobre una imagen nueva con versiones soportadas.
-2. **Respaldos continuos** (WAL + respaldos base) de la BD de casa a Azure Blob Storage, más un **`pg_dump`
-   semanal** como copia lógica independiente (opción C elegida).
-3. **Infraestructura de Azure como código** con Terraform: una parte persistente (barata) y un cluster AKS efímero.
-4. Overlay `nube` de Kustomize que despliega la misma app que en local, con TLS, token, restricción por IP y
-   secretos desde Azure Key Vault.
-5. **Ensayo de restauración** repetible y verificado, y un procedimiento documentado de **toma de control** (mudar
-   el ETL a la nube) para el día que haga falta.
-6. Costos medidos y con alarmas.
+**Goals**
+1. Database on **CloudNativePG** (CNPG) in every environment, on a new image with supported versions.
+2. **Continuous backups** (WAL + base backups) of the home database to Azure Blob Storage, plus a **weekly
+   `pg_dump`** as an independent logical copy (option C chosen).
+3. **Azure infrastructure as code** with Terraform: a persistent (cheap) part and an ephemeral AKS cluster.
+4. A `nube` Kustomize overlay that deploys the same app as locally, with TLS, token, IP restriction and
+   secrets from Azure Key Vault.
+5. A repeatable, verified **restore drill**, and a documented **takeover** procedure (moving
+   the ETL to the cloud) for the day it is needed.
+6. Measured costs with alarms.
 
-**No-metas (en esta fase)**
-- CI/CD (Jenkins u otro): fase siguiente.
-- Instalar el servidor de casa (proyecto aparte; hereda lo que aquí se haga en el overlay local).
-- Un standby en vivo permanente en Azure (CNPG *replica cluster*): posible después; hoy costaría tenerlo encendido.
-- API pública, multi-región, GitOps (Argo CD/Flux).
+**Non-goals (in this phase)**
+- CI/CD (Jenkins or other): next phase.
+- Installing the home server (separate project; it inherits whatever is done here in the local overlay).
+- A permanent live standby in Azure (CNPG *replica cluster*): possible later; today keeping it on would cost money.
+- Public API, multi-region, GitOps (Argo CD/Flux).
 
-**Anti-metas (fracaso aunque "funcione")**
-- Gasto sorpresa: que el cluster quede encendido sin saberlo y se coma el crédito (con el límite de gasto, agotarlo
-  además apaga el almacenamiento de respaldos).
-- **Dos ETL a la vez** con la misma clave de TomTom (casa y nube): excede la cuota (D29).
-- Secretos o `tfstate` en git.
-- Que la nube diverja tanto de casa que el ensayo de restauración no pruebe nada real (otra versión de BD, otro
-  esquema, otra red OSM).
-- Perder datos de casa durante la actualización de la BD.
+**Anti-goals (failure even if it "works")**
+- Surprise spending: the cluster left on unnoticed eating the credit (with the spending limit, exhausting it
+  also shuts down the backup storage).
+- **Two ETLs at once** with the same TomTom key (home and cloud): exceeds the quota (D29).
+- Secrets or `tfstate` in git.
+- The cloud diverging so much from home that the restore drill proves nothing real (another database version, another
+  schema, another OSM network).
+- Losing home data during the database upgrade.
 
-## 3. Restricciones
+## 3. Constraints
 
-- **Suscripción Azure for Students:** $100 USD de crédito por **12 meses** (renovable cada año mientras sea
-  estudiante), sin tarjeta y con **límite de gasto**: al agotarse el crédito, Azure deshabilita los recursos —
-  incluido el almacenamiento de respaldos. Estas suscripciones suelen tener una política de **regiones permitidas**
-  y una **cuota de vCPU** baja; ambas se consultan al empezar (`az policy assignment list`, `az vm list-usage`) y
-  acotan región y tamaño de nodos. Lo persistente tiene que costar centavos al mes: el crédito debe durar el año.
-- AKS con plano de control gratuito; los nodos, disco y balanceador cuestan mientras existen (estimado sin
-  verificar: ~$90/mes si quedara encendido; una sesión de unas horas, ~$1). Por eso sesiones.
-- Una sola clave de TomTom (cuotas: tiles 200 000/mes, Segment Data 20 000/mes, pool en `consumo_api`).
-- Imagen de BD actual fijada (PG 15.2 / TimescaleDB 2.10.2 / PostGIS 3.3.2 / pgRouting 4.0.1, D17) y **no es
-  compatible con CNPG** tal cual (`03b` lo advierte). PG 15 deja de tener soporte en nov. 2027.
-- **TimescaleDB solo restaura un `pg_dump` en la misma versión de la extensión** (luego se actualiza con
-  `ALTER EXTENSION ... UPDATE`). Esto condiciona la actualización (§5.1) y el uso del dump semanal (§5.2).
-  Corrige lo dicho en la conversación: el dump no es "independiente de versión"; es independiente del formato
-  físico y del operador, pero pide la misma versión de TimescaleDB al restaurar.
-- Reglas del repo: dependencias e imágenes con versión exacta; cambios de esquema solo por `db/migrations/`; cada
-  decisión con entrada en `DECISIONES.md`; un dominio por herramienta (D18).
-- Equipo local con ~7.6 GiB para Docker; el cluster local se apaga a diario.
+- **Azure for Students subscription:** $100 USD of credit for **12 months** (renewable every year while a
+  student), no card and with a **spending limit**: when the credit runs out, Azure disables the resources —
+  including backup storage. These subscriptions usually have an **allowed regions** policy
+  and a low **vCPU quota**; both are checked at the start (`az policy assignment list`, `az vm list-usage`) and
+  bound the region and node size. The persistent part has to cost cents per month: the credit must last the year.
+- AKS with a free control plane; nodes, disk and load balancer cost money while they exist (unverified estimate:
+  ~$90/month if left on; a session of a few hours, ~$1). Hence sessions.
+- A single TomTom key (quotas: tiles 200 000/month, Segment Data 20 000/month, pool in `consumo_api`).
+- The current database image is pinned (PG 15.2 / TimescaleDB 2.10.2 / PostGIS 3.3.2 / pgRouting 4.0.1, D17) and **is not
+  compatible with CNPG** as-is (`03b` warns about it). PG 15 goes out of support in Nov. 2027.
+- **TimescaleDB only restores a `pg_dump` on the same extension version** (then it is upgraded with
+  `ALTER EXTENSION ... UPDATE`). This conditions the upgrade (§5.1) and the use of the weekly dump (§5.2).
+  It corrects what was said in the conversation: the dump is not "version-independent"; it is independent of the
+  physical format and the operator, but it needs the same TimescaleDB version when restoring.
+- Repo rules: dependencies and images at exact versions; schema changes only through `db/migrations/`; every
+  decision with an entry in `DECISIONES.md`; one domain per tool (D18).
+- Local computer with ~7.6 GiB for Docker; the local cluster is shut down daily.
 
-## 4. Relación con el servidor de casa
+## 4. Relationship with the home server
 
-El overlay `local` es la plantilla del servidor de casa. Todo lo que esta fase cambie en local (CNPG, respaldos a
-Azure) lo hereda el servidor. Instalar el servidor (sistema operativo, k3s o k3d, acceso remoto, y ahí sí Ansible)
-es un proyecto aparte que se planea después o en paralelo. Hasta entonces, **el equipo actual hace de "casa"**:
-los respaldos salen de k3d.
+The `local` overlay is the template for the home server. Everything this phase changes locally (CNPG, backups to
+Azure) is inherited by the server. Installing the server (operating system, k3s or k3d, remote access, and there Ansible)
+is a separate project planned afterwards or in parallel. Until then, **the current computer acts as "home"**:
+the backups come from k3d.
 
-## 5. Diseño
+## 5. Design
 
-### 5.0 Orden de trabajo (y por qué)
+### 5.0 Order of work (and why)
 
-1. **Etapa A — BD nueva y actualización (local).** Prerrequisito de todo lo demás: sin una imagen compatible con
-   CNPG no hay respaldos continuos ni restauración en la nube.
-2. **Etapa B — Base persistente en Azure + respaldos desde casa.** Terraform crea lo barato y duradero (storage,
-   Key Vault, registro); la BD de casa empieza a respaldarse ahí.
-3. **Etapa C — Cluster AKS efímero + overlay `nube`.** Se levanta, se despliega, se prueba, se destruye.
-4. **Etapa D — Ensayo de restauración y toma de control.** El objetivo de la fase.
+1. **Stage A — New database and upgrade (local).** A prerequisite for everything else: without a CNPG-compatible image
+   there are no continuous backups or restores in the cloud.
+2. **Stage B — Persistent base in Azure + backups from home.** Terraform creates the cheap, durable part (storage,
+   Key Vault, registry); the home database starts backing up there.
+3. **Stage C — Ephemeral AKS cluster + `nube` overlay.** Brought up, deployed, tested, destroyed.
+4. **Stage D — Restore drill and takeover.** The goal of the phase.
 
-Cada etapa termina con su verificación y su decisión en `DECISIONES.md` (D45 en adelante).
+Each stage ends with its verification and its decision in `DECISIONES.md` (D45 onwards).
 
-**Despliegue objetivo (UML: despliegue).** Casa respalda de forma continua a la parte persistente de Azure; el
-cluster efímero se crea por sesión y restaura desde ahí.
+**Target deployment (UML: deployment).** Home continuously backs up to the persistent part of Azure; the
+ephemeral cluster is created per session and restores from there.
 
 ```mermaid
 flowchart LR
-    subgraph CASA["«dispositivo» Casa (PC / servidor)"]
-        C_DB["«Cluster CNPG» geotracker-db ×1<br/>PG 17 + TimescaleDB + PostGIS + pgRouting"]
+    subgraph CASA["«device» Home (PC / server)"]
+        C_DB["«CNPG Cluster» geotracker-db ×1<br/>PG 17 + TimescaleDB + PostGIS + pgRouting"]
         C_PLG["«plugin» Barman Cloud"]
-        C_DUMP["«CronJob» dump semanal"]
-        C_ETL["«CronJob» geotracker-etl — ACTIVO"]
+        C_DUMP["«CronJob» weekly dump"]
+        C_ETL["«CronJob» geotracker-etl — ACTIVE"]
         C_APP["API, PgBouncer, Grafana/Prometheus"]
-        C_DISK[("«disco» copia local de dumps")]
+        C_DISK[("«disk» local copy of dumps")]
     end
 
     subgraph AZP["«Azure» persistente/"]
         SA[("«Storage Account»<br/>wal-respaldos · dumps · tfstate")]
-        KV["«Key Vault» secretos"]
-        BUD["«Budget» alertas 25/50/80 %"]
+        KV["«Key Vault» secrets"]
+        BUD["«Budget» alerts 25/50/80 %"]
     end
 
-    subgraph AZE["«Azure» aks/ (por sesión)"]
-        ACR["«ACR» imágenes de la sesión"]
-        PIP["«IP pública» + etiqueta DNS"]
-        subgraph AKS["«AKS» 2 nodos"]
+    subgraph AZE["«Azure» aks/ (per session)"]
+        ACR["«ACR» session images"]
+        PIP["«Public IP» + DNS label"]
+        subgraph AKS["«AKS» 2 nodes"]
             N_ING["Traefik + cert-manager (TLS)"]
             N_API["API ×2, PgBouncer ×2"]
-            N_DB["«Cluster CNPG» geotracker-db ×2<br/>bootstrap.recovery"]
-            N_ETL["«CronJob» geotracker-etl — SUSPENDIDO"]
+            N_DB["«CNPG Cluster» geotracker-db ×2<br/>bootstrap.recovery"]
+            N_ETL["«CronJob» geotracker-etl — SUSPENDED"]
             N_ESO["External Secrets"]
             N_OBS["Grafana/Prometheus"]
         end
     end
 
-    CEL["«actor» Celular"]
+    CEL["«actor» Phone"]
 
-    C_DB --- C_PLG -->|WAL continuo + base diario| SA
-    C_DUMP -->|semanal| SA
+    C_DB --- C_PLG -->|continuous WAL + daily base| SA
+    C_DUMP -->|weekly| SA
     C_DUMP --> C_DISK
-    N_DB -->|restaura| SA
+    N_DB -->|restores| SA
     N_ESO -->|Workload Identity| KV
     AKS -->|AcrPull| ACR
     CEL -->|HTTPS + X-API-Key| PIP --> N_ING --> N_API --> N_DB
 ```
 
-### 5.1 Etapa A — Imagen de BD para CNPG y actualización de versiones
+### 5.1 Stage A — Database image for CNPG and version upgrade
 
-- **Imagen nueva** sobre la imagen oficial de CNPG con PostGIS (`ghcr.io/cloudnative-pg/postgis`) + TimescaleDB +
-  pgRouting, todo con versión exacta y base fijada por digest (como D17). Objetivo de versiones: **PostgreSQL 17**
-  con las versiones de TimescaleDB, PostGIS y pgRouting más recientes que existan empaquetadas para PG 17 — llamada
-  mía: saltar a 17 ahora evita repetir la migración antes de nov. 2027. El constructor confirma las versiones exactas.
-- **Camino de actualización (llamada mía; el constructor lo valida):** por la restricción de TimescaleDB,
-  1. respaldo `pg_dump -Fc` de la BD actual (como D43);
-  2. llevar TimescaleDB de 2.10.2 a una versión que exista **para PG 15 y para PG 17** (imagen PG 15 intermedia
-     con esa versión + `ALTER EXTENSION timescaledb UPDATE`), sobre una **copia**, no sobre la BD viva;
-  3. dump de esa copia → restaurar en el `Cluster` CNPG nuevo (PG 17, misma versión de TimescaleDB) con
+- **New image** on top of the official CNPG image with PostGIS (`ghcr.io/cloudnative-pg/postgis`) + TimescaleDB +
+  pgRouting, all at exact versions and with the base pinned by digest (as in D17). Version target: **PostgreSQL 17**
+  with the most recent TimescaleDB, PostGIS and pgRouting versions packaged for PG 17 — my call:
+  jumping to 17 now avoids repeating the migration before Nov. 2027. The builder confirms the exact versions.
+- **Upgrade path (my call; the builder validates it):** because of the TimescaleDB constraint,
+  1. `pg_dump -Fc` backup of the current database (as in D43);
+  2. bring TimescaleDB from 2.10.2 to a version that exists **for both PG 15 and PG 17** (intermediate PG 15 image
+     with that version + `ALTER EXTENSION timescaledb UPDATE`), on a **copy**, not on the live database;
+  3. dump that copy → restore into the new CNPG `Cluster` (PG 17, same TimescaleDB version) with
      `timescaledb_pre_restore()` / `timescaledb_post_restore()`;
-  4. `ALTER EXTENSION ... UPDATE` a las versiones finales (TimescaleDB, PostGIS, pgRouting);
-  5. verificación igual que D43 (conteos y sumas exactas por día y tabla, ruta a flujo libre idéntica) más la
-     suite de tests y `migrate.py` sin pendientes;
-  6. corte: suspender el `CronJob` del ETL, último dump/delta, repuntar PgBouncer/API a `geotracker-db-rw`,
-     reanudar el ETL. El `StatefulSet` viejo y su PVC se conservan hasta cerrar la etapa.
-**Camino de actualización (UML: actividad).**
+  4. `ALTER EXTENSION ... UPDATE` to the final versions (TimescaleDB, PostGIS, pgRouting);
+  5. verification as in D43 (exact counts and sums per day and table, identical free-flow route) plus the
+     test suite and `migrate.py` with nothing pending;
+  6. cut-over: suspend the ETL `CronJob`, last dump/delta, repoint PgBouncer/API to `geotracker-db-rw`,
+     resume the ETL. The old `StatefulSet` and its PVC are kept until the stage is closed.
+**Upgrade path (UML: activity).**
 
 ```mermaid
 flowchart TD
-    S([Inicio]) --> B1["Respaldo pg_dump -Fc de la BD viva<br/>(PG 15.2 / TS 2.10.2)"]
-    B1 --> C1["Restaurar el respaldo en una COPIA<br/>con imagen PG 15 + TimescaleDB intermedia"]
-    C1 --> U1["ALTER EXTENSION timescaledb UPDATE<br/>→ versión que existe para PG 15 y PG 17"]
-    U1 --> D2["pg_dump de la copia actualizada"]
-    D2 --> R2["Restaurar en el Cluster CNPG nuevo (PG 17, misma versión de TS)<br/>timescaledb_pre_restore / post_restore"]
-    R2 --> U2["ALTER EXTENSION ... UPDATE<br/>TimescaleDB, PostGIS, pgRouting finales"]
-    U2 --> V{"¿Verificación igual a D43?<br/>conteos y sumas por día · ruta libre<br/>tests · migrate.py sin pendientes"}
-    V -- no --> F["Investigar; la BD vieja sigue en servicio"]
+    S([Start]) --> B1["pg_dump -Fc backup of the live database<br/>(PG 15.2 / TS 2.10.2)"]
+    B1 --> C1["Restore the backup into a COPY<br/>with a PG 15 + intermediate TimescaleDB image"]
+    C1 --> U1["ALTER EXTENSION timescaledb UPDATE<br/>→ version that exists for PG 15 and PG 17"]
+    U1 --> D2["pg_dump of the upgraded copy"]
+    D2 --> R2["Restore into the new CNPG Cluster (PG 17, same TS version)<br/>timescaledb_pre_restore / post_restore"]
+    R2 --> U2["ALTER EXTENSION ... UPDATE<br/>final TimescaleDB, PostGIS, pgRouting"]
+    U2 --> V{"Verification as in D43?<br/>counts and sums per day · free route<br/>tests · migrate.py with nothing pending"}
+    V -- no --> F["Investigate; the old database stays in service"]
     F --> C1
-    V -- sí --> K1["Corte: suspender CronJob del ETL"]
-    K1 --> K2["Delta final desde la BD vieja"]
+    V -- yes --> K1["Cut-over: suspend the ETL CronJob"]
+    K1 --> K2["Final delta from the old database"]
     K2 --> K3["PgBouncer / API → geotracker-db-rw"]
-    K3 --> K4["Reanudar CronJob; verificar ejecuciones_etl"]
-    K4 --> E([StatefulSet viejo + PVC se conservan hasta cerrar la etapa])
+    K3 --> K4["Resume CronJob; check ejecuciones_etl"]
+    K4 --> E([Old StatefulSet + PVC kept until the stage is closed])
 ```
 
-- **Manifiestos:** `03b-database-cnpg.yaml` reescrito para la imagen nueva; `base` deja de incluir `03` y pasa a
-  `03b`; el operador CNPG (versión fija) se instala con su manifiesto/Helm como componente de plataforma.
-  Instancias: **1 en local/casa** (memoria), **2 en la nube** (primaria + réplica, suficiente para probar failover
-  con 2 nodos; `03b` decía 3 — llamada mía por costo).
-- **Lo que no cambia:** esquema (las migraciones 001–015 siguen igual), red OSM e IDs (D43), rol `grafana_ro`,
-  `ejecuciones_etl`, continuous aggregate (se refresca tras restaurar, como en D43).
-- Los parámetros de memoria de D39 pasan a `spec.postgresql.parameters` del `Cluster`.
+- **Manifests:** `03b-database-cnpg.yaml` rewritten for the new image; `base` stops including `03` and switches to
+  `03b`; the CNPG operator (pinned version) is installed with its manifest/Helm as a platform component.
+  Instances: **1 locally/at home** (memory), **2 in the cloud** (primary + replica, enough to test failover
+  with 2 nodes; `03b` said 3 — my call, for cost).
+- **What does not change:** schema (migrations 001–015 stay the same), OSM network and IDs (D43), `grafana_ro` role,
+  `ejecuciones_etl`, continuous aggregate (refreshed after restoring, as in D43).
+- D39's memory parameters move to the `Cluster`'s `spec.postgresql.parameters`.
 
-### 5.2 Etapa B — Base persistente en Azure y respaldos
+### 5.2 Stage B — Persistent base in Azure and backups
 
-**Terraform en dos raíces** (`deploy/terraform/`):
-- `persistente/` (se crea una vez y cuesta centavos al mes):
-  - grupo de recursos; cuenta de almacenamiento con contenedores `wal-respaldos` (CNPG), `dumps` (semanal) y
-    `tfstate` (estado remoto de Terraform, con bloqueo nativo de Azure Blob);
-  - **Azure Key Vault** con los secretos (DB, TomTom, tokens de API, Grafana, ntfy);
-  - presupuesto de Azure con alertas por correo (p. ej. 25/50/80 % del crédito anual).
-  - **Sin registro de imágenes persistente** — llamada mía: un ACR Basic (~$5/mes) se comería ~60 % del crédito
-    anual de Azure for Students. El ACR vive en la raíz efímera `aks/` y las imágenes se suben al empezar cada
-    sesión (más lento; conviene reducir el tamaño de las imágenes, riesgo ya anotado en `KUBERNETES.md`).
-  - El `tfstate` de esta raíz arranca en local y se migra al contenedor `tfstate` tras el primer `apply`
-    (problema del huevo y la gallina; procedimiento documentado).
-- `aks/` (efímera, §5.3).
+**Terraform in two roots** (`deploy/terraform/`):
+- `persistente/` (created once and costs cents per month):
+  - resource group; storage account with containers `wal-respaldos` (CNPG), `dumps` (weekly) and
+    `tfstate` (Terraform remote state, with Azure Blob's native locking);
+  - **Azure Key Vault** with the secrets (database, TomTom, API tokens, Grafana, ntfy);
+  - Azure budget with email alerts (e.g. 25/50/80 % of the annual credit).
+  - **No persistent image registry** — my call: an ACR Basic (~$5/month) would eat ~60 % of the annual
+    Azure for Students credit. The ACR lives in the ephemeral `aks/` root and images are pushed at the start of each
+    session (slower; it pays to reduce image size, a risk already noted in `KUBERNETES.md`).
+  - This root's `tfstate` starts locally and is migrated to the `tfstate` container after the first `apply`
+    (chicken-and-egg problem; procedure documented).
+- `aks/` (ephemeral, §5.3).
 
-**Respaldos de casa:**
-- **Continuos:** plugin Barman Cloud de CNPG → `wal-respaldos`. Archivo de WAL continuo + `ScheduledBackup` base
-  diario. Retención: 14 días (llamada mía). Credenciales en casa: SAS o clave de la cuenta en un `Secret`
-  generado desde un archivo fuera de git (como D27).
-- **Semanal lógico:** `CronJob` con `pg_dump -Fc` → `dumps`, retención 8 semanas (llamada mía). Es la copia que
-  sobrevive a una corrupción física y la que sirve para saltos de versión (§3). **También se guarda en un disco
-  de casa** (llamada mía): si la suscripción de estudiante caduca o se agota el crédito, Azure deshabilita el
-  almacenamiento y los respaldos de allá dejan de estar disponibles.
-**Flujo de respaldos (UML: secuencia).**
+**Home backups:**
+- **Continuous:** CNPG's Barman Cloud plugin → `wal-respaldos`. Continuous WAL archiving + a daily base
+  `ScheduledBackup`. Retention: 14 days (my call). Credentials at home: SAS or the account key in a `Secret`
+  generated from a file outside git (as in D27).
+- **Weekly logical:** `CronJob` with `pg_dump -Fc` → `dumps`, 8-week retention (my call). It is the copy that
+  survives physical corruption and the one that works for version jumps (§3). **It is also stored on a home
+  disk** (my call): if the student subscription expires or the credit runs out, Azure disables the
+  storage and the backups there become unavailable.
+**Backup flow (UML: sequence).**
 
 ```mermaid
 sequenceDiagram
-    participant DB as CNPG primaria (casa)
-    participant PL as Plugin Barman Cloud
-    participant SB as ScheduledBackup (diario)
-    participant DJ as CronJob dump (semanal)
+    participant DB as CNPG primary (home)
+    participant PL as Barman Cloud plugin
+    participant SB as ScheduledBackup (daily)
+    participant DJ as Dump CronJob (weekly)
     participant BL as Azure Blob
-    participant HD as Disco de casa
+    participant HD as Home disk
     participant GR as Grafana → ntfy
 
-    loop cada segmento de WAL (continuo)
-        DB->>PL: WAL completado
+    loop each WAL segment (continuous)
+        DB->>PL: WAL completed
         PL->>BL: wal-respaldos/
     end
-    SB->>DB: respaldo base
-    DB->>PL: archivos del respaldo
+    SB->>DB: base backup
+    DB->>PL: backup files
     PL->>BL: wal-respaldos/ (base)
     DJ->>DB: pg_dump -Fc
     DJ->>BL: dumps/
-    DJ->>HD: copia local
-    note over BL: retención: 14 días WAL/base · 8 semanas dumps
-    GR->>GR: alerta si: WAL > 1 h sin archivar ·<br/>sin base en 26 h · sin dump en 8 días
+    DJ->>HD: local copy
+    note over BL: retention: 14 days WAL/base · 8 weeks dumps
+    GR->>GR: alert if: WAL > 1 h unarchived ·<br/>no base in 26 h · no dump in 8 days
 ```
 
-- **Observabilidad:** alertas nuevas como código (mismo patrón D40–D42): "WAL sin archivar > 1 h", "sin respaldo
-  base en 26 h", "sin dump en 8 días", con aviso por ntfy.
-- **Verificación de la etapa:** listar el contenido en Blob; restaurar el respaldo base + WAL en un `Cluster`
-  temporal **en k3d** (antes de gastar en AKS) y pasar el verificador de §5.4.
+- **Observability:** new alerts as code (same pattern as D40–D42): "WAL unarchived > 1 h", "no base
+  backup in 26 h", "no dump in 8 days", notified through ntfy.
+- **Stage verification:** list the contents in Blob; restore the base backup + WAL into a temporary `Cluster`
+  **on k3d** (before spending on AKS) and run the §5.4 verifier.
 
-### 5.3 Etapa C — Cluster AKS efímero y overlay `nube`
+### 5.3 Stage C — Ephemeral AKS cluster and `nube` overlay
 
-**`deploy/terraform/aks/`** (lee los datos de `persistente/` por `terraform_remote_state` o data sources):
-- AKS tier gratuito, 1 pool de **2 nodos** pequeños (tamaño lo elige el constructor según la línea base de
-  `KUBERNETES.md` y la cuota de vCPU de la suscripción), identidad administrada.
-- ACR Basic de la sesión, con `AcrPull` para el cluster; se destruye con él.
-- **Workload Identity**: CNPG (lectura/escritura en Blob) y External Secrets (lectura de Key Vault) sin claves
-  guardadas en el cluster.
-- IP pública con **etiqueta DNS de Azure** (`<etiqueta>.<región>.cloudapp.azure.com`): da un nombre para TLS sin
-  comprar dominio — llamada mía.
-- Región: la más cercana a SLP entre las **permitidas por la política de la suscripción de estudiante** y con AKS
-  (candidatas: `mexicocentral`, `southcentralus`); el constructor la confirma como primer paso de la etapa B.
+**`deploy/terraform/aks/`** (reads `persistente/`'s data via `terraform_remote_state` or data sources):
+- AKS free tier, 1 pool of **2 small nodes** (size chosen by the builder from the `KUBERNETES.md`
+  baseline and the subscription's vCPU quota), managed identity.
+- Session ACR Basic, with `AcrPull` for the cluster; destroyed with it.
+- **Workload Identity**: CNPG (read/write to Blob) and External Secrets (read from Key Vault) without keys
+  stored in the cluster.
+- Public IP with an **Azure DNS label** (`<label>.<region>.cloudapp.azure.com`): gives a name for TLS without
+  buying a domain — my call.
+- Region: the closest to SLP among those **allowed by the student subscription's policy** and with AKS
+  (candidates: `mexicocentral`, `southcentralus`); the builder confirms it as the first step of stage B.
 
-**Plataforma en el cluster** (versiones fijas, instalada desde scripts del repo):
-- Operador CNPG + plugin Barman Cloud.
-- **External Secrets Operator** leyendo de Key Vault — llamada mía, en lugar de Sealed Secrets: con un cluster que
-  se destruye y recrea, la clave de Sealed Secrets se perdería en cada sesión; Key Vault persiste fuera del cluster.
-- **Traefik** como Ingress (el mismo controlador que k3d: paridad con local) + **cert-manager** con Let's Encrypt
-  (HTTP-01). **Acceso: token + TLS** (decidido por el usuario), sin lista de IPs: el celular con datos móviles
-  cambia de IP. Una red privada (p. ej. Tailscale) queda como paso posterior opcional.
-- `kube-prometheus-stack` con los mismos valores que local + ajustes de nube; dashboards y alertas desde
-  `platform/` sin cambios. **Alertas: Grafana Alerting con ntfy, igual que en local** — llamada mía que contradice
-  D31 ("Alertmanager en la nube"): duplicar las reglas en dos formatos no enseña lo suficiente para su costo.
-  Tema de ntfy distinto al de casa.
+**Platform in the cluster** (pinned versions, installed from repo scripts):
+- CNPG operator + Barman Cloud plugin.
+- **External Secrets Operator** reading from Key Vault — my call, instead of Sealed Secrets: with a cluster that
+  is destroyed and recreated, the Sealed Secrets key would be lost on every session; Key Vault persists outside the cluster.
+- **Traefik** as Ingress (the same controller as k3d: parity with local) + **cert-manager** with Let's Encrypt
+  (HTTP-01). **Access: token + TLS** (decided by the user), no IP list: the phone on mobile data
+  changes IP. A private network (e.g. Tailscale) is an optional later step.
+- `kube-prometheus-stack` with the same values as locally + cloud adjustments; dashboards and alerts from
+  `platform/` unchanged. **Alerts: Grafana Alerting with ntfy, same as locally** — my call that contradicts
+  D31 ("Alertmanager in the cloud"): duplicating the rules in two formats does not teach enough for its cost.
+  A different ntfy topic from home's.
 
-**Overlay `deploy/k8s/overlays/nube/`:**
-- `Cluster` CNPG con 2 instancias, `storageClass` administrada de Azure, `bootstrap.recovery` desde
-  `wal-respaldos` (§5.4) en lugar de `initdb`.
-- API con 2 réplicas (PDB y `topologySpreadConstraints` ya existen en `base`), PgBouncer 2 réplicas.
-- **`CronJob` del ETL con `suspend: true` por defecto** (anti-meta: dos ETL).
-- **Sin el `Job` de la red OSM**: la red llega con la restauración.
-- `Job` de migraciones igual (idempotente: tras restaurar no debe aplicar nada).
-- Secretos vía `ExternalSecret` (mismos nombres de `Secret` que local: `geotracker-secret`, `grafana-secret`).
-- Imágenes desde ACR con tag fijo (no `latest`): el constructor define el esquema de tags; CI/CD lo
-  automatizará después.
+**`deploy/k8s/overlays/nube/` overlay:**
+- CNPG `Cluster` with 2 instances, Azure managed `storageClass`, `bootstrap.recovery` from
+  `wal-respaldos` (§5.4) instead of `initdb`.
+- API with 2 replicas (PDB and `topologySpreadConstraints` already exist in `base`), PgBouncer 2 replicas.
+- **ETL `CronJob` with `suspend: true` by default** (anti-goal: two ETLs).
+- **No OSM network `Job`**: the network arrives with the restore.
+- Migrations `Job` unchanged (idempotent: after restoring it must apply nothing).
+- Secrets via `ExternalSecret` (same `Secret` names as locally: `geotracker-secret`, `grafana-secret`).
+- Images from ACR with a fixed tag (not `latest`): the builder defines the tagging scheme; CI/CD will
+  automate it later.
 
-**Scripts de sesión** (`deploy/scripts/` o similar): `nube-arriba.sh` (terraform apply `aks/` → plataforma →
-`apply -k overlays/nube` → espera a que todo esté sano) y `nube-abajo.sh` (destroy de `aks/`, comprobando que no
-quedan discos ni IPs huérfanas). `persistente/` nunca se destruye desde estos scripts.
+**Session scripts** (`deploy/scripts/` or similar): `nube-arriba.sh` (terraform apply `aks/` → platform →
+`apply -k overlays/nube` → wait until everything is healthy) and `nube-abajo.sh` (destroy `aks/`, checking that no
+orphaned disks or IPs remain). `persistente/` is never destroyed from these scripts.
 
-### 5.4 Etapa D — Ensayo de restauración y toma de control
+### 5.4 Stage D — Restore drill and takeover
 
-**Ensayo (repetible, el criterio central de la fase):**
-1. `nube-arriba.sh` con recuperación desde el último respaldo base + WAL (o a un instante dado).
-2. **Verificador de restauración** (generaliza el de D43): compara casa vs nube por día y tabla (conteos y sumas
-   exactas en `numeric`, la suma ponderada por `u`) hasta el punto de recuperación; misma ruta a flujo libre;
-   `schema_migrations` y versiones de extensiones iguales.
-3. Pruebas de la nube: ruta real por HTTPS con token; sin token → 401; HTTP sin TLS → redirigido; borrar el
-   pod primario de la BD → la réplica asume y la API sigue respondiendo (failover); dashboards y alertas cargados.
-4. Registrar tiempos (cuánto tarda la restauración) y costo de la sesión.
+**Drill (repeatable, the central criterion of the phase):**
+1. `nube-arriba.sh` with recovery from the latest base backup + WAL (or to a given instant).
+2. **Restore verifier** (generalizes D43's): compares home vs cloud per day and table (exact counts and sums
+   in `numeric`, the sum weighted by `u`) up to the recovery point; same free-flow route;
+   equal `schema_migrations` and extension versions.
+3. Cloud tests: real route over HTTPS with token; no token → 401; HTTP without TLS → redirected; delete the
+   database's primary pod → the replica takes over and the API keeps responding (failover); dashboards and alerts loaded.
+4. Record times (how long the restore takes) and the session's cost.
 5. `nube-abajo.sh`.
-**Sesión con ensayo de restauración (UML: secuencia).**
+**Session with restore drill (UML: sequence).**
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as Usuario
+    actor U as User
     participant SC as nube-arriba.sh / nube-abajo.sh
     participant TF as Terraform aks/
     participant AZ as Azure
     participant K as AKS
     participant BL as Blob (wal-respaldos)
-    participant VR as Verificador
-    participant CA as BD de casa
+    participant VR as Verifier
+    participant CA as Home database
 
     U->>SC: nube-arriba.sh
     SC->>TF: terraform apply
-    TF->>AZ: AKS, ACR, IP pública + DNS, identidades
-    SC->>AZ: push de imágenes al ACR
-    SC->>K: plataforma (CNPG, ESO, Traefik, cert-manager, kps)
+    TF->>AZ: AKS, ACR, public IP + DNS, identities
+    SC->>AZ: push images to ACR
+    SC->>K: platform (CNPG, ESO, Traefik, cert-manager, kps)
     SC->>K: kubectl apply -k overlays/nube
-    K->>BL: Cluster CNPG: bootstrap.recovery (último WAL o instante)
-    K->>K: Job de migraciones (sin pendientes) · ETL suspendido
-    U->>VR: verificar restauración
-    VR->>CA: conteos y sumas por día (hasta el punto de recuperación)
-    VR->>K: mismas consultas en la nube
-    VR-->>U: idénticos / diferencias
-    U->>K: pruebas: HTTPS + token, sin token → 401, failover de la primaria
+    K->>BL: CNPG Cluster: bootstrap.recovery (latest WAL or instant)
+    K->>K: Migrations Job (nothing pending) · ETL suspended
+    U->>VR: verify restore
+    VR->>CA: counts and sums per day (up to the recovery point)
+    VR->>K: same queries in the cloud
+    VR-->>U: identical / differences
+    U->>K: tests: HTTPS + token, no token → 401, primary failover
     U->>SC: nube-abajo.sh
-    SC->>TF: terraform destroy (comprueba discos e IPs huérfanas)
+    SC->>TF: terraform destroy (checks orphaned disks and IPs)
 ```
 
-- **Variante con el dump semanal** (menos frecuente, p. ej. una vez al cerrar la fase y luego trimestral):
-  restaurar desde `dumps` en vez de WAL, con la misma versión de TimescaleDB, y pasar el mismo verificador.
+- **Variant with the weekly dump** (less frequent, e.g. once when closing the phase and then quarterly):
+  restore from `dumps` instead of WAL, with the same TimescaleDB version, and run the same verifier.
 
-**Toma de control (documentada y ensayada una vez):** suspender el `CronJob` de casa → restauración en la nube al
-último WAL → reanudar el `CronJob` de la nube → verificar ciclos en `ejecuciones_etl` → y la vuelta (suspender
-nube, reanudar casa; los datos generados en la nube durante la toma se devuelven con el mismo mecanismo de D43).
-Nunca dos `CronJob` activos.
+**Takeover (documented and rehearsed once):** suspend the home `CronJob` → restore in the cloud to the
+latest WAL → resume the cloud `CronJob` → check cycles in `ejecuciones_etl` → and the way back (suspend
+cloud, resume home; the data generated in the cloud during the takeover is returned with the same mechanism as D43).
+Never two active `CronJob`s.
 
-**Toma de control (UML: estados).** Invariante: en todo estado hay como mucho un `CronJob` del ETL activo.
+**Takeover (UML: states).** Invariant: in every state there is at most one active ETL `CronJob`.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CasaActiva
-    CasaActiva: Casa activa (ETL casa ON, nube inexistente o ETL nube OFF)
-    HaciaNube: Transición a la nube (ambos ETL OFF)
-    NubeActiva: Nube activa (ETL nube ON, ETL casa OFF)
-    HaciaCasa: Retorno (ambos ETL OFF)
+    [*] --> HomeActive
+    HomeActive: Home active (home ETL ON, cloud nonexistent or cloud ETL OFF)
+    ToCloud: Transition to the cloud (both ETLs OFF)
+    CloudActive: Cloud active (cloud ETL ON, home ETL OFF)
+    ToHome: Return (both ETLs OFF)
 
-    CasaActiva --> HaciaNube: suspender CronJob de casa
-    HaciaNube --> NubeActiva: restaurar al último WAL, verificar, reanudar CronJob de la nube
-    HaciaNube --> CasaActiva: falla la restauración → reanudar casa
-    NubeActiva --> HaciaCasa: suspender CronJob de la nube
-    HaciaCasa --> CasaActiva: devolver datos generados en la nube (mecanismo D43), reanudar casa
-    CasaActiva --> [*]: nube-abajo.sh
+    HomeActive --> ToCloud: suspend home CronJob
+    ToCloud --> CloudActive: restore to latest WAL, verify, resume cloud CronJob
+    ToCloud --> HomeActive: restore fails → resume home
+    CloudActive --> ToHome: suspend cloud CronJob
+    ToHome --> HomeActive: return data generated in the cloud (D43 mechanism), resume home
+    HomeActive --> [*]: nube-abajo.sh
 ```
 
-### 5.5 Documentación y decisiones
+### 5.5 Documentation and decisions
 
-- `docs/KUBERNETES.md`: fase 2 reescrita con este diseño; preguntas 8 (Terraform/`tfstate`) y 10 (canal) cerradas.
-- `DECISIONES.md`: una entrada por decisión de etapa (imagen/versiones, actualización, respaldos, Terraform en dos
-  raíces, External Secrets, Traefik + etiqueta DNS, alertas en la nube, ensayo).
-- `DATABASE.md`: versiones nuevas del motor.
-- Runbooks: actualización, sesión en la nube, ensayo de restauración, toma de control.
+- `docs/KUBERNETES.md`: phase 2 rewritten with this design; questions 8 (Terraform/`tfstate`) and 10 (channel) closed.
+- `DECISIONES.md`: one entry per stage decision (image/versions, upgrade, backups, Terraform in two
+  roots, External Secrets, Traefik + DNS label, cloud alerts, drill).
+- `DATABASE.md`: new engine versions.
+- Runbooks: upgrade, cloud session, restore drill, takeover.
 
-## 6. Enfoques considerados
+## 6. Approaches considered
 
-| Enfoque | A favor | En contra |
+| Approach | Pros | Cons |
 |---|---|---|
-| A. `pg_dump` nocturno a Blob + restauración lógica | Simple; sin depender de CNPG en casa | Hasta un día de pérdida; restauración lenta al crecer; no ejercita los respaldos de CNPG |
-| B. CNPG en casa con respaldos continuos (WAL) a Blob | Pérdida de minutos; misma BD en todos lados; recuperación a un instante | Requiere la imagen nueva y la actualización **antes** de Azure |
-| **C. B + `pg_dump` semanal (elegido)** | Lo de B, más una copia lógica que sobrevive a corrupción física y sirve para saltos de versión | Lo de B, más un `CronJob` y su almacenamiento |
+| A. Nightly `pg_dump` to Blob + logical restore | Simple; no dependency on CNPG at home | Up to a day of loss; slow restore as it grows; does not exercise CNPG backups |
+| B. CNPG at home with continuous (WAL) backups to Blob | Minutes of loss; same database everywhere; point-in-time recovery | Requires the new image and the upgrade **before** Azure |
+| **C. B + weekly `pg_dump` (chosen)** | B's benefits, plus a logical copy that survives physical corruption and works for version jumps | B's costs, plus a `CronJob` and its storage |
 
-**Elegido: C**, por el usuario, tras la recomendación: la actualización de la BD era prerrequisito de todos modos,
-el servidor de casa es una instalación nueva (empezar en CNPG cuesta poco) y el dump semanal cubre lo que los
-respaldos físicos no.
+**Chosen: C**, by the user, after the recommendation: the database upgrade was a prerequisite anyway,
+the home server is a new installation (starting on CNPG costs little) and the weekly dump covers what physical
+backups do not.
 
-## 7. Decidido por el usuario vs llamadas mías
+## 7. Decided by the user vs my calls
 
-**Decidido por el usuario:** propósito educativo + "por si acaso"; servidor de casa como sistema real; mudar el
-sistema vivo con su histórico (respaldos + ensayo de restauración); enfoque C; CI/CD después; acceso a la API en
-la nube por token + TLS (sin lista de IPs); suscripción Azure for Students.
+**Decided by the user:** educational purpose + "just in case"; home server as the real system; move the
+live system with its history (backups + restore drill); approach C; CI/CD later; access to the API in
+the cloud by token + TLS (no IP list); Azure for Students subscription.
 
-**Llamadas mías (revisables):** PostgreSQL 17; camino de actualización vía versión intermedia de TimescaleDB;
-2 instancias de BD en la nube y 1 en casa; Terraform en dos raíces; ACR efímero por sesión (no persistente, por
-el crédito anual); dump semanal también en un disco de casa; External Secrets + Key
-Vault en vez de Sealed Secrets; Traefik + etiqueta DNS de Azure en vez de dominio propio; Grafana Alerting en la
-nube (revierte parte de D31); retenciones (14 días WAL/base, 8 semanas dumps); sin `Job` OSM en la nube; Ansible
-fuera de esta fase (pasa al proyecto del servidor de casa, donde sí prepara hosts).
+**My calls (reviewable):** PostgreSQL 17; upgrade path via an intermediate TimescaleDB version;
+2 database instances in the cloud and 1 at home; Terraform in two roots; ephemeral per-session ACR (not persistent, because of
+the annual credit); weekly dump also on a home disk; External Secrets + Key
+Vault instead of Sealed Secrets; Traefik + Azure DNS label instead of an own domain; Grafana Alerting in the
+cloud (reverts part of D31); retention periods (14 days WAL/base, 8 weeks dumps); no OSM `Job` in the cloud; Ansible
+out of this phase (moves to the home server project, where it does prepare hosts).
 
-## 8. Lo que queda al constructor
+## 8. Left to the builder
 
-Versiones exactas (imagen CNPG, TimescaleDB, PostGIS, pgRouting, operador, plugin, charts, Terraform/proveedor
-azurerm); tamaño de nodos y región dentro de la política y la cuota de la suscripción de estudiante; ruta del
-disco de casa para la copia del dump; esquema de tags de imágenes; forma exacta de los scripts
-de sesión y del verificador; nombres de recursos de Azure; umbrales de las alertas de respaldo; cómo exponer a
-Grafana en la nube (port-forward o detrás del mismo Ingress con autenticación).
+Exact versions (CNPG image, TimescaleDB, PostGIS, pgRouting, operator, plugin, charts, Terraform/azurerm
+provider); node size and region within the student subscription's policy and quota; path of the
+home disk for the dump copy; image tagging scheme; exact shape of the session scripts
+and the verifier; Azure resource names; backup alert thresholds; how to expose
+Grafana in the cloud (port-forward or behind the same Ingress with authentication).
