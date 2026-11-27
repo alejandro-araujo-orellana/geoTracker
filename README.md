@@ -26,15 +26,13 @@ notifications.
 
 ## Visual demo
 
-<!-- Replace the paths below with your own screenshots (e.g. docs/images/*.png). -->
-
 | Traffic heatmap (Grafana) | Fastest route with traffic |
 |---|---|
 | ![Traffic heatmap of San Luis Potosí in Grafana](docs/images/heatmap.png) | ![Route returned by /api/v1/rutas drawn on a map](docs/images/route.png) |
 
-| API docs (Swagger UI) | Kubernetes cluster / alerts |
+| API docs (Swagger UI) | Kubernetes cluster resources |
 |---|---|
-| ![Interactive API documentation](docs/images/swagger.png) | ![Pods and Grafana alerts](docs/images/cluster.png) |
+| ![Interactive API documentation](docs/images/swagger.png) | ![CPU and memory per namespace in Grafana](docs/images/cluster.png) |
 
 ---
 
@@ -169,22 +167,26 @@ curl -H "X-API-Key: $TOKEN" \
   'http://localhost:8000/api/v1/rutas?origen=22.1497,-100.9739&destino=22.1460,-101.0130'
 ```
 
-Response (values are illustrative):
+Response (a real one, with `calles` and `geometria` truncated):
 
 ```json
 {
-  "origen":  { "lat": 22.1497, "lon": -100.9739, "distancia_encaje_m": 12.4 },
-  "destino": { "lat": 22.1460, "lon": -101.0130, "distancia_encaje_m": 8.1 },
-  "distancia_m": 4630.2,
-  "duracion_s": 742.5,
-  "duracion_flujo_libre_s": 561.0,
-  "demora_trafico_s": 181.5,
-  "trafico": { "timestamp": "2026-11-26T18:45:00Z", "vigente": true },
-  "calles": ["Avenida Venustiano Carranza", "Avenida Himno Nacional", "..."],
+  "origen":  { "lat": 22.1497, "lon": -100.9739, "distancia_encaje_m": 46.33 },
+  "destino": { "lat": 22.146,  "lon": -101.013,  "distancia_encaje_m": 24.16 },
+  "distancia_m": 5099.67,
+  "duracion_s": 468.99,
+  "duracion_flujo_libre_s": 426.98,
+  "demora_trafico_s": 42.02,
+  "trafico": { "timestamp": "2026-11-27T03:15:03Z", "vigente": true },
+  "calles": ["Avenida Universidad", "Avenida Constitución", "Calle Primero de Mayo", "...", "Privada Bucarelli y Urzúa"],
   "geometria": { "type": "LineString", "coordinates": [[-100.9739, 22.1497], "..."] },
   "tramos": null
 }
 ```
+
+Tip: pipe the response through `jq` to read it, e.g. `jq 'del(.geometria, .tramos)'` for the summary, or
+`jq '{type:"Feature", properties:{}, geometry:.geometria}' > ruta.geojson` to draw the route on
+[geojson.io](https://geojson.io).
 
 | Parameter | Description |
 |---|---|
@@ -312,8 +314,6 @@ geoTracker/
 | [`docs/ROUTING.md`](docs/ROUTING.md) | Traffic-aware routing design |
 | [`docs/KUBERNETES.md`](docs/KUBERNETES.md) | Kubernetes plan, deployment and operations |
 | [`docs/DECISIONES.md`](docs/DECISIONES.md) | Decision log (what and why) |
-
-> Project documentation is written in Spanish.
 
 ---
 

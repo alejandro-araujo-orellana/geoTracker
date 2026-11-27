@@ -42,7 +42,7 @@ groups:
               type: threshold
               expression: A
               conditions:
-                # 45 min = 3 missed cycles of */15 (KUBERNETES.md, "Alertas iniciales").
+                # 45 min = 3 missed cycles of */15 (KUBERNETES.md, "Initial alerts").
                 - evaluator: { type: gt, params: [45] }
         # No series = kube-state-metrics down or the CronJob gone: we cannot tell
         # the ETL is running, so treat it as firing.
@@ -58,7 +58,7 @@ groups:
             Último ciclo exitoso del CronJob geotracker-etl hace {{ printf "%.0f" $values.A.Value }} min.
             Esos ciclos no tienen datos de tráfico. Revisar: kubectl get cronjob,jobs -n geotracker
             (¿suspend=true?, ¿Job fallido?) y si el equipo estuvo apagado o suspendido.
-          runbook_url: docs/KUBERNETES.md#observabilidad-operación-d33
+          runbook_url: docs/KUBERNETES.md#observability-operations-d33
 
       # The Job can succeed without measuring anything (tile pass failed and was
       # absorbed, 403 block, no budget): ejecuciones_etl (D41) tells. Needs >= 3
